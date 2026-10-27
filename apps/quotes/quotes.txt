@@ -1,0 +1,32 @@
+# One quote per line: text | author. Lines starting with # are ignored.
+# Plain ASCII only: the built-in font has no curly quotes or long dashes.
+Waste no more time arguing about what a good man should be. Be one. | Marcus Aurelius
+The impediment to action advances action. What stands in the way becomes the way. | Marcus Aurelius
+We suffer more often in imagination than in reality. | Seneca
+The unexamined life is not worth living. | Socrates
+Well begun is half done. | Aristotle
+We are what we repeatedly do. Excellence, then, is not an act, but a habit. | Will Durant
+If I have seen further it is by standing on the shoulders of Giants. | Isaac Newton
+Nothing in life is to be feared, it is only to be understood. | Marie Curie
+Energy and persistence conquer all things. | Benjamin Franklin
+Well done is better than well said. | Benjamin Franklin
+Lost time is never found again. | Benjamin Franklin
+Genius is one percent inspiration and ninety-nine percent perspiration. | Thomas Edison
+The best way out is always through. | Robert Frost
+Knowing is not enough; we must apply. | Johann Wolfgang von Goethe
+He who has a why to live can bear almost any how. | Friedrich Nietzsche
+Courage is grace under pressure. | Ernest Hemingway
+A journey of a thousand miles begins with a single step. | Lao Tzu
+The best time to plant a tree was 20 years ago. The second best time is now. | Proverb
+Fall seven times, stand up eight. | Japanese proverb
+Measure twice, cut once. | Proverb
+Security is a process, not a product. | Bruce Schneier
+Amateurs hack systems, professionals hack people. | Bruce Schneier
+Premature optimization is the root of all evil. | Donald Knuth
+Simple is better than complex. | The Zen of Python
+Talk is cheap. Show me the code. | Linus Torvalds
+Make it work, make it right, make it fast. | Kent Beck
+First, solve the problem. Then, write the code. | John Johnson
+The details are not the details. They make the design. | Charles Eames
+Discipline equals freedom. | Jocko Willink
+Stay hungry. Stay foolish. | Whole Earth Catalog

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.DS_Store
+# local board inventory, passwords, firmware caches and flash backups live outside the repo
+# (~/.config/cpfleet, ~/Library/Caches/cpfleet); never commit them
+boards.json
+password
+*.img
+*.bin

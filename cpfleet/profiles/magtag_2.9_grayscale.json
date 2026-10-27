@@ -1,0 +1,21 @@
+{
+  "name": "magtag_2.9_grayscale",
+  "title": "Adafruit MagTag 2.9\" grayscale (ESP32-S2), including the 2025 Edition with the SSD1680 display",
+  "board_id": "adafruit_magtag_2.9_grayscale",
+  "chip": "esp32s2",
+  "name_prefix": "MagTag",
+  "circuitpython_bin": "https://downloads.circuitpython.org/bin/{board_id}/en_US/adafruit-circuitpython-{board_id}-en_US-{version}.bin",
+  "tinyuf2_board": "adafruit_magtag_29gray",
+  "flash_size": "0x400000",
+  "ffat_offset": "0x310000",
+  "ffat_size": "0xF0000",
+  "otadata_offset": "0xe000",
+  "otadata_size": "0x2000",
+  "usb_drive_pin": "BUTTON_D",
+  "notes": [
+    "Partitions (TinyUF2 and CircuitPython agree): nvs 0x9000, otadata 0xe000, ota_0 0x10000 (CircuitPython), uf2 0x2d0000 (TinyUF2, factory app), ffat 0x310000 (CIRCUITPY).",
+    "CircuitPython's full .bin covers otadata with 0xFF, which makes the board boot TinyUF2; cpfleet writes an otadata entry selecting ota_0 after every firmware write.",
+    "After esptool's software reset the board drops off USB until Reset is pressed, so cpfleet never resets it from esptool.",
+    "ROM download mode by hand: hold Boot, press and release Reset, release Boot. USB 303a:0002."
+  ]
+}

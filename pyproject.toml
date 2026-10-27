@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cpfleet"
+version = "0.1.0"
+description = "Manage several CircuitPython boards over Wi-Fi (web workflow) from the command line: status, push, run, logs, provisioning"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "kashmeister"}]
+requires-python = ">=3.9"
+dependencies = []
+keywords = ["circuitpython", "web-workflow", "magtag", "esp32-s2", "esp32", "adafruit", "cli", "fleet", "e-ink"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Embedded Systems",
+]
+
+[project.urls]
+Homepage = "https://github.com/kashmeister/cpfleet"
+Issues = "https://github.com/kashmeister/cpfleet/issues"
+
+[project.scripts]
+cpfleet = "cpfleet.cli:main"
+
+[tool.setuptools]
+packages = ["cpfleet"]
+
+[tool.setuptools.package-data]
+cpfleet = ["profiles/*.json", "board_files/*.py"]
