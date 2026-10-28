@@ -1,13 +1,14 @@
-# Claude Code agents on a MagTag: the sessions and running subagents that extras/agents_watch.py reports,
-# with the LEDs pulsing amber while a session waits for you.
-#   A: switch between agents and a quote    B: acknowledge (LEDs off until something new waits)
-#   C: another quote (in quote view)
+# Coding agents on a MagTag: the Claude Code, Codex and opencode sessions and running subagents that
+# extras/agents_watch.py reports, one view per tool, with the LEDs pulsing amber while a session of any
+# tool waits for you (the second line marks the views that wait).
+#   A: next view: Claude, Codex, opencode (when they have sessions), a quote
+#   B: acknowledge (LEDs off until something new waits)      C: another quote (in quote view)
 # The screen redraws at most every AGENTS_REDRAW seconds (default 30) for new data; buttons redraw at once.
 # Where the data comes from, first match wins:
 #   USB: lines on usb_cdc.data from agents_watch.py --usb (needs CPFLEET_USB_DATA = 1 and a reset; boot.py)
 #   Wi-Fi: AGENTS_URL if set, else the watcher found by name over mDNS (_cpagents._tcp); a failing
 #          AGENTS_URL is looked up again by name. AGENTS_TOKEN, if set, is sent to a watcher that wants one.
-# Built-in modules only (no lib/); usblink.py is this app's USB line protocol.
+# Built-in modules only (no lib/); usblink.py is this app's USB line protocol, views.py its screens.
 import json
 import math
 import os
@@ -24,6 +25,8 @@ import terminalio
 import wifi
 
 import usblink
+import views
+from views import rjust
 
 try:
     import usb_cdc
@@ -52,14 +55,6 @@ CW, CH = FONT.get_bounding_box()[:2]
 BLANK = FONT.get_glyph(ord(" ")).tile_index
 wifi.radio.power_management = wifi.PowerManagement.NONE  # answer quickly instead of sleeping between beacons
 pool = socketpool.SocketPool(wifi.radio)
-
-
-def pad(s, n):  # CircuitPython's str has no ljust/rjust
-    return s[:n] + " " * max(0, n - len(s))
-
-
-def rjust(s, n):
-    return " " * max(0, n - len(s)) + s
 
 
 # ---- watcher -------------------------------------------------------------------------------------------
@@ -121,50 +116,6 @@ def read_usb():
     return snap
 
 
-def age(seconds):
-    """Coarse, so the screen doesn't redraw every minute: now, 1-9m, 10m steps, then hours."""
-    m = seconds // 60
-    if m < 1:
-        return "now"
-    if m < 10:
-        return "%dm" % m
-    if m < 60:
-        return "%dm" % (m // 10 * 10)
-    return "%dh" % (m // 60)
-
-
-SYMBOL = {"question": "?", "your-turn": "!", "busy": "~", "working": ">", "idle": "."}
-LABEL = {"your-turn": "your turn", "busy": "busy?", "working": "working", "idle": "idle"}
-
-
-def agent_lines(d, cols, rows, offline_since, source):
-    sessions = d.get("sessions", [])
-    gen = d.get("generated", 0)
-    head = "AGENTS"
-    if d.get("waiting"):
-        head += "  %d waiting" % d["waiting"]
-    if offline_since:
-        head = "WATCHER OFFLINE since " + d.get("clock", "?")
-    tail = (source + " " if source else "") + d.get("clock", "")
-    lines = [pad(head, cols - 12) + rjust(tail, 11), ""]
-    if not sessions:
-        lines.append("no Claude Code sessions in the last hours")
-    for s in sessions:
-        label = (s.get("detail") or "question") if s["state"] == "question" else LABEL[s["state"]]
-        if s["state"] in ("question", "your-turn"):
-            label += " " + age(gen - s["since"])
-        name_w = cols - 3 - len(label)
-        lines.append(SYMBOL[s["state"]] + " " + pad(s["title"], name_w) + label)
-        subs = s.get("subagents", [])
-        for sub in subs[:2]:
-            lines.append(pad("   - %s: %s" % (sub["type"], sub["desc"]), cols - 1))
-        if len(subs) > 2:
-            lines.append("   + %d more subagents" % (len(subs) - 2))
-    if len(lines) > rows:
-        lines = lines[:rows - 1] + ["  + %d more" % (len(lines) - rows + 1)]
-    return lines
-
-
 # ---- quotes (shares /quotes.txt with apps/quotes) ------------------------------------------------------
 
 def load_quotes():
@@ -202,15 +153,49 @@ def quote_lines(quote, cols, rows):
 
 # ---- screen and LEDs -----------------------------------------------------------------------------------
 
+# A check mark for finished subagents, one character cell in size (terminalio's font has none). Drawn in
+# the font's 6x12 cell as its capitals are: rows 2-8, columns 0-4, the last column left blank as spacing.
+CHECK_SHAPE = ("    #",
+               "    #",
+               "   ##",
+               "   # ",
+               "# ## ",
+               "###  ",
+               " #   ")
+CHECK_TOP = 2
+
+
+def check_bitmap():
+    bmp = displayio.Bitmap(CW, CH, 2)
+    for y, line in enumerate(CHECK_SHAPE):
+        for x, c in enumerate(line):
+            if c == "#" and x < CW and CHECK_TOP + y < CH:
+                bmp[x, CHECK_TOP + y] = 1
+    return bmp
+
+
+CHECK = check_bitmap()
+
+
 def draw(lines, scale):
     cols, rows = display.width // (CW * scale), display.height // (CH * scale)
     palette = displayio.Palette(2)
     palette[0], palette[1] = 0xFFFFFF, 0x000000
     grid = displayio.TileGrid(FONT.bitmap, pixel_shader=palette, width=cols, height=rows,
                               tile_width=CW, tile_height=CH, default_tile=BLANK)
-    terminalio.Terminal(grid, FONT).write("\r\n".join(l[:cols - 1] for l in lines[:rows]))
+    text, checks = [], []
+    for r, line in enumerate(lines[:rows]):
+        line = line[:cols - 1]
+        c = line.find(views.CHECK)
+        while c >= 0:
+            checks.append((c, r))
+            c = line.find(views.CHECK, c + 1)
+        text.append(line.replace(views.CHECK, " "))
+    terminalio.Terminal(grid, FONT).write("\r\n".join(text))
     group = displayio.Group(scale=scale)
     group.append(grid)
+    for c, r in checks:
+        group.append(displayio.TileGrid(CHECK, pixel_shader=palette, x=c * CW, y=r * CH))
     display.root_group = group
     display.refresh()
 
@@ -235,7 +220,8 @@ keys = keypad.Keys((board.BUTTON_A, board.BUTTON_B, board.BUTTON_C), value_when_
 quotes = load_quotes()
 quote = random.choice(quotes)
 quote_at = time.monotonic()
-view, data, shown, acked = "agents", {}, None, set()
+view, data, shown, acked = "claude", {}, None, set()
+data_n, built, lines, scale = 0, None, [], 1  # data_n counts snapshots, so lines are rebuilt only for new ones
 last_draw, force = -REDRAW, True
 last_fetch, last_ok = -POLL, time.monotonic()
 url, fails, last_lookup = URL, 0, -LOOKUP_EVERY
@@ -256,6 +242,7 @@ while True:
             if last_usb is None or now - last_usb >= USB_STALE:
                 print("data from USB")
             data, last_ok, last_usb, source = snap, now, now, "USB"
+            data_n += 1
     usb_fresh = last_usb is not None and now - last_usb < USB_STALE
     if not usb_fresh and now - last_fetch >= POLL and wifi.radio.ipv4_address:
         last_fetch = now
@@ -268,6 +255,7 @@ while True:
         if url:
             try:
                 data = fetch(url)
+                data_n += 1
                 if source != "WiFi":
                     print("data from Wi-Fi:", url)
                 last_ok, fails, source = now, 0, "WiFi"
@@ -279,7 +267,7 @@ while True:
     if event and event.pressed:
         force = True
         if event.key_number == 0:
-            view = "quote" if view == "agents" else "agents"
+            view = views.next_view(view, data)
         elif event.key_number == 1:
             acked |= {(s["id"], s["since"]) for s in data.get("sessions", [])}
         elif event.key_number == 2 and view == "quote":
@@ -302,19 +290,28 @@ while True:
     else:
         leds(0, 0, 0)
 
-    if not known:
+    due = force or now - last_draw >= REDRAW
+    if not due:
+        time.sleep(0.05)
+        continue
+    if view not in views.views(data):  # that tool's sessions are gone
+        view = "claude"
+    key = (data_n, view, offline, source, known, quote)
+    if key == built:
+        pass
+    elif not known:
         lines, scale = ["Looking for the agents watcher...", "",
                         "Start extras/agents_watch.py on the Mac", "(Wi-Fi, found by name), or with --usb",
                         "and plug this board into it. Or set",
                         "AGENTS_URL http://<mac-ip>:8766/agents.json"], 1
-    elif view == "agents":
+    elif view != "quote":
         cols, rows = display.width // CW, display.height // CH
-        lines, scale = agent_lines(data, cols, rows, offline, source), 1
+        lines, scale = views.agent_lines(data, view, cols, rows, offline, source), 1
     else:
         cols, rows = display.width // (CW * 2), display.height // (CH * 2)
         lines, scale = quote_lines(quote, cols, rows), 2
-    due = force or now - last_draw >= REDRAW
-    if due and (lines, scale) != shown and display.time_to_refresh == 0 and not display.busy:
+    built = key
+    if (lines, scale) != shown and display.time_to_refresh == 0 and not display.busy:
         try:
             draw(lines, scale)
             shown, last_draw, force = (lines, scale), now, False

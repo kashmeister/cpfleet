@@ -1,4 +1,4 @@
-"""The Claude Code agents watcher (extras/agents_watch.py), against fake transcripts."""
+"""The agents watcher (extras/agents_watch.py) with Claude Code transcripts, and its USB and HTTP sides."""
 import importlib.util
 import json
 import os
@@ -54,6 +54,8 @@ class Snapshot(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         aw.PROJECTS = self.root
+        aw.CODEX_HOME = self.root / "no-codex"  # this computer's own Codex and opencode stay out of it
+        aw.OPENCODE_DB = self.root / "no-opencode.db"
         self.proj = self.root / "-Users-me-code-myproj"
         self.proj.mkdir()
 
@@ -81,7 +83,9 @@ class Snapshot(unittest.TestCase):
         self.assertEqual(got, [("Finished one", "your-turn"), ("myproj", "busy"), ("Busy one", "working")])
         self.assertEqual(snap["waiting"], 1)
         working = snap["sessions"][2]
-        self.assertEqual(working["subagents"], [{"type": "Explore", "desc": "find tests"}])
+        sub = working["subagents"][0]
+        self.assertEqual((sub["type"], sub["desc"], "done" in sub), ("Explore", "find tests", False))
+        self.assertAlmostEqual(sub["since"], time.time(), delta=5)
 
 
 SNAP = {"generated": 100, "clock": "12:00", "host": "mac", "waiting": 0,
