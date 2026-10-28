@@ -238,17 +238,23 @@ def find_boards(esp, prof, reinstall, only=None):
 
 
 def into_rom(esp, board, circuitpython_ports):
-    """Switch a board into ROM download mode just before flashing it and return its ROM port. A board
-    switched by software doesn't stay in download mode for long, so this happens per board, not up front."""
+    """Switch a board into ROM download mode just before flashing it and return its ROM port.
+
+    After a software switch the chip's RTC watchdog is still armed. Only esptool commands that load its
+    flasher stub (read-flash, write-flash, erase-flash) disarm it, so this mustn't identify the port with
+    chip-id (that lets the board reboot out of download mode seconds later), and the caller's next esptool
+    command must follow at once. The board's ROM port is the one new port that appears."""
     if board["in_rom"]:
         return board["port"]
+    before = set(serial_ports())
     to_rom_bootloader(board["port"], board["via"])
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
-        time.sleep(1)
-        for port in serial_ports():
-            if port not in circuitpython_ports and esp.mac(port) == board["mac"]:
-                return port
+        time.sleep(0.5)
+        new = [p for p in serial_ports() if p not in before and p not in circuitpython_ports]
+        if len(new) == 1:
+            time.sleep(0.5)  # let the port settle
+            return new[0]
     die("%s didn't come up in download mode; hold Boot, press and release Reset, release Boot, and run "
         "this again" % board["mac"])
 
