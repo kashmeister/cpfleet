@@ -14,8 +14,10 @@
   "usb_drive_pin": "BUTTON_D",
   "notes": [
     "Partitions (TinyUF2 and CircuitPython agree): nvs 0x9000, otadata 0xe000, ota_0 0x10000 (CircuitPython), uf2 0x2d0000 (TinyUF2, factory app), ffat 0x310000 (CIRCUITPY).",
-    "CircuitPython's full .bin covers otadata with 0xFF, which makes the board boot TinyUF2; cpfleet writes an otadata entry selecting ota_0 after every firmware write.",
-    "After esptool's software reset the board drops off USB until Reset is pressed, so cpfleet never resets it from esptool.",
-    "ROM download mode by hand: hold Boot, press and release Reset, release Boot. USB 303a:0002."
+    "CircuitPython's full .bin covers otadata with 0xFF, which makes the board boot TinyUF2; cpfleet writes an otadata entry selecting ota_0.",
+    "Switched to the ROM bootloader by software (microcontroller.RunMode.BOOTLOADER), the board reboots a few seconds after each esptool session ends (and after chip-id), so cpfleet does each step in its own session right after switching, and writes the whole new flash as one image. That reboot also means no Reset is needed afterwards.",
+    "esptool's own reset (--after hard-reset) leaves the board off USB until Reset is pressed, so cpfleet always uses --after no-reset.",
+    "ROM download mode by hand: hold Boot, press and release Reset, release Boot. USB 303a:0002. A board in download mode by hand stays there until reset.",
+    "The USB console sometimes stops taking input while still sending output (a reset clears it); cpfleet then uses the board's Wi-Fi console, matching the USB port name to the board's UID."
   ]
 }

@@ -128,7 +128,7 @@ cpfleet bundle "https://learn.adafruit.com/.../download?type=zip" --to all -n   
 ```sh
 cpfleet provision --dry-run           # what it would do to each board on USB
 cpfleet provision                     # asks for the Wi-Fi name and password once, for all boards
-cpfleet scan                          # after pressing Reset on each board
+cpfleet scan                          # once the boards have restarted and joined Wi-Fi
 ```
 
 For every board of the profile on USB (default `magtag_2.9_grayscale`):
@@ -140,6 +140,12 @@ For every board of the profile on USB (default `magtag_2.9_grayscale`):
 - **Web workflow password:** shared by all boards, and also kept in `~/.config/cpfleet/password`.
 
 Each board is named `MagTag-<last 4 hex digits of its MAC>`; change that with `--name`.
+
+Each esptool step runs in its own session, straight after the board is switched to download mode. The
+whole new flash is assembled first and written in one go, about a minute per board. That's because an
+ESP32-S2 switched to download mode by software reboots a few seconds after each session. The same
+behaviour means those boards restart into their new firmware by themselves. Only a board you put in
+download mode by hand (Boot + Reset) needs Reset pressed afterwards.
 `cpfleet firmware` updates CircuitPython and keeps the files. `--only 1a2b` limits either command to
 particular boards.
 

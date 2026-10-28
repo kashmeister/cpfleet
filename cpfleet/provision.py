@@ -379,7 +379,8 @@ def main(a):
             for f in (img, Path(whole.name)):
                 f.write_bytes(b"\0" * f.stat().st_size)
     inventory.set_password(web_pw)
-    print("Done. Press Reset on each board; once they're on Wi-Fi, run `cpfleet scan` (or `cpfleet add <ip>`).")
+    print("Done. Boards cpfleet switched restart by themselves; press Reset on any you put in download mode by "
+          "hand. Once they're on Wi-Fi, run `cpfleet scan` (or `cpfleet add <ip>`).")
 
 
 def firmware(a):
@@ -403,4 +404,4 @@ def firmware(a):
     for b in found:
         rom_session(esp, b, cp_ports, "write-flash", "0x0", str(patched))
         print("%s: CircuitPython %s written" % (b["mac"], cp_ver))
-    print("Press Reset on each board.")
+    print("Boards cpfleet switched restart by themselves; press Reset on any you put in download mode by hand.")
