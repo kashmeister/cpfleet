@@ -74,6 +74,16 @@ class Firmware(unittest.TestCase):
         self.assertEqual(img[0x2d0000:0x2d0001], b"U")             # TinyUF2's uf2 partition kept
         self.assertEqual(img[0x310000 + 510:0x310000 + 512], b"\x55\xaa")  # CIRCUITPY file system
 
+    def test_serial_ports_skip_usb_data_channels(self):
+        ports = {"/dev/cu.usbmodem*": ["/dev/cu.usbmodemC7AA3", "/dev/cu.usbmodemC7AA1", "/dev/cu.usbmodem14101"],
+                 "/dev/ttyACM*": []}
+        real = provision.glob.glob
+        provision.glob.glob = lambda pattern: list(ports[pattern])
+        try:
+            self.assertEqual(provision.serial_ports(), ["/dev/cu.usbmodem14101", "/dev/cu.usbmodemC7AA1"])
+        finally:
+            provision.glob.glob = real
+
     def test_fat12_matches_circuitpython_geometry(self):
         img = provision.fat12_image(0xF0000)
         self.assertEqual(len(img), 0xF0000)

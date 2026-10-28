@@ -54,7 +54,13 @@ def tool(name, hint):
 
 
 def serial_ports():
-    return sorted(glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/ttyACM*"))
+    """USB serial consoles. A board with its USB data channel on (CPFLEET_USB_DATA in boot.py) has a second
+    port that doesn't answer the REPL; on macOS it is named like the console but for the last digit (the
+    USB interface), so only the first port of each such pair is listed."""
+    consoles = {}
+    for p in sorted(glob.glob("/dev/cu.usbmodem*")):
+        consoles.setdefault(p[:-1], p)
+    return sorted(consoles.values()) + sorted(glob.glob("/dev/ttyACM*"))
 
 
 class Esp:
@@ -234,6 +240,8 @@ def find_boards(esp, prof, reinstall, only=None):
             continue
         probed.add(port)
         major, board_id, mac, via = info
+        if any(f["mac"] == mac for f in found):
+            continue  # the same board's other port (its data channel, on Linux)
         if via:
             print("%s: USB console didn't answer; using %s over Wi-Fi" % (port, via["name"]))
         if board_id != prof["board_id"]:
