@@ -186,6 +186,8 @@ def circuitpython_board(port):
             continue
         try:
             with transport(port, via_wifi) as t:
+                if via_wifi is None:
+                    repl.enter_raw(t, attempts=2)  # a stuck USB console: give up quickly, Wi-Fi is next
                 out, err = repl.run(t, PROBE, 5)
                 repl.reload(t)
         except (repl.ReplError, OSError, ConnectionError, inventory.InventoryError):
@@ -212,6 +214,9 @@ def find_boards(esp, prof, reinstall, only=None, dry_run=False):
     wanted = lambda mac: not only or any(mac.endswith(s.lower()) for s in only)
     keep, boards = {}, {}
     for port in serial_ports():
+        twin = wifi_twin(port)
+        if twin and twin.get("mac") and not wanted(twin["mac"]):
+            continue  # a known board that --only excludes: don't touch it
         info = circuitpython_board(port)
         if info is None:
             continue
