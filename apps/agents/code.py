@@ -2,6 +2,7 @@
 # with the LEDs pulsing amber while a session waits for you.
 #   A: switch between agents and a quote    B: acknowledge (LEDs off until something new waits)
 #   C: another quote (in quote view)
+# The screen redraws at most every AGENTS_REDRAW seconds (default 30) for new data; buttons redraw at once.
 # Set the watcher's address once:  cpfleet settings <boards> set AGENTS_URL http://<mac-ip>:8766/agents.json
 # Built-in modules only (no lib/).
 import json
@@ -24,6 +25,9 @@ POLL = 3            # seconds between fetches
 FRESH = 3600        # waiting sessions newer than this light the LEDs
 OFFLINE = 30        # seconds without a reply before saying the watcher is offline
 QUOTE_EVERY = 15 * 60
+# Minimum seconds between e-ink redraws for new data, to spare the panel; the LEDs still react at once.
+# Button presses redraw straight away. Override per board: cpfleet settings <b> set AGENTS_REDRAW 60
+REDRAW = int(os.getenv("AGENTS_REDRAW") or 30)
 
 display = board.DISPLAY
 FONT = terminalio.FONT
@@ -180,6 +184,7 @@ quotes = load_quotes()
 quote = random.choice(quotes)
 quote_at = time.monotonic()
 view, data, shown, acked = "agents", {}, None, set()
+last_draw, force = -REDRAW, True
 last_fetch, last_ok = -POLL, time.monotonic()
 
 while True:
@@ -194,6 +199,7 @@ while True:
 
     event = keys.events.get()
     if event and event.pressed:
+        force = True
         if event.key_number == 0:
             view = "quote" if view == "agents" else "agents"
         elif event.key_number == 1:
@@ -224,10 +230,13 @@ while True:
     else:
         cols, rows = display.width // (CW * 2), display.height // (CH * 2)
         lines, scale = quote_lines(quote, cols, rows), 2
-    if (lines, scale) != shown and display.time_to_refresh == 0 and not display.busy:
+    due = force or now - last_draw >= REDRAW
+    if due and (lines, scale) != shown and display.time_to_refresh == 0 and not display.busy:
         try:
             draw(lines, scale)
-            shown = (lines, scale)
+            shown, last_draw, force = (lines, scale), now, False
         except RuntimeError:  # refreshed too soon; try again next time round
             pass
+    elif force and (lines, scale) == shown:
+        force = False
     time.sleep(0.05)

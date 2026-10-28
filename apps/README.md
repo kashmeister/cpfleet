@@ -15,7 +15,7 @@ Each folder is pushed to boards as is: `cpfleet push apps/<name> --to <boards>`.
 - its `custom-title.json`;
 - its `subagents/*.meta.json`.
 
-It serves a compact `/agents.json` on your network. No hooks or settings changes are involved. The MagTags fetch it every 3 seconds, redraw only when something changes, and light their LEDs at once.
+It serves a compact `/agents.json` on your network. No hooks or settings changes are involved. The MagTags fetch it every 3 seconds and light their LEDs at once. To spare the e-ink panel, they redraw at most every 30 seconds for new data (`cpfleet settings <b> set AGENTS_REDRAW 60` to change that per board); button presses redraw straight away.
 
 ```sh
 python3 extras/agents_watch.py                    # serves http://0.0.0.0:8766/agents.json
