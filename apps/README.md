@@ -17,11 +17,10 @@ Each folder is pushed to boards as is: `cpfleet push apps/<name> --to <boards>`.
 
 A tool that isn't installed, or has nothing in the last `--hours` (3), is left out; a database that is locked or unreadable is skipped for that scan, and the others carry on. `--sources claude,codex` reads only those. The databases are opened read-only (`mode=ro`); nothing of any tool's settings is touched.
 
-It serves a compact `/agents.json` on your network and advertises it over Bonjour as `_cpagents._tcp` (with macOS's own `dns-sd`). No hooks or settings changes are involved. The MagTags find it by name, fetch it every 3 seconds and light their LEDs at once. To spare the e-ink panel, they redraw at most every 30 seconds for new data (`cpfleet settings <b> set AGENTS_REDRAW 60` to change that per board); button presses redraw straight away. The header names the view's tool and how many of its sessions wait, with where the data comes from (`WiFi` or `USB`) and the watcher's clock on the right. When more than one tool has sessions, the second line lists the views, the current one in brackets, each with its waiting count, so you can tell which view the LEDs are about:
+It serves a compact `/agents.json` on your network and advertises it over Bonjour as `_cpagents._tcp` (with macOS's own `dns-sd`). No hooks or settings changes are involved. The MagTags find it by name, fetch it every 3 seconds and light their LEDs at once. To spare the e-ink panel, they redraw at most every 30 seconds for new data (`cpfleet settings <b> set AGENTS_REDRAW 60` to change that per board); button presses redraw straight away. The top line names the view's tool and how many of its sessions wait, with where the data comes from (`WiFi` or `USB`) and the watcher's clock on the right; the sessions follow straight after. The LEDs pulse for a waiting session in any tool, so press A to find which view it's in:
 
 ```
 CLAUDE CODE  2 waiting                WiFi 14:05
-[Claude 2!]  Codex 1!  opencode
 ! Fix the parser                              9m
   + Explore: find tests                       2m
   ✓ write the summary

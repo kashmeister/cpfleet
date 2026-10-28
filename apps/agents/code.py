@@ -1,6 +1,6 @@
 # Coding agents on a MagTag: the Claude Code, Codex and opencode sessions and running subagents that
 # extras/agents_watch.py reports, one view per tool, with the LEDs pulsing amber while a session of any
-# tool waits for you (the second line marks the views that wait).
+# tool waits for you (A steps through the views; each view's top line says how many of its sessions wait).
 #   A: next view: Claude, Codex, opencode (when they have sessions), a quote
 #   B: acknowledge (LEDs off until something new waits)      C: another quote (in quote view)
 # The screen redraws at most every AGENTS_REDRAW seconds (default 30) for new data; buttons redraw at once.

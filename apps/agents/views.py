@@ -97,19 +97,6 @@ def sub_text(sub):
     return desc or t
 
 
-def tabs(d, tool, waiting):
-    """The tool views, the current one in brackets, each with how many sessions wait: so you can see which
-    view the LEDs are about. Empty with only Claude to show."""
-    vs = [v for v in views(d) if v != "quote"]
-    if len(vs) < 2:
-        return ""
-    out = []
-    for v in vs:
-        label = SHORT[v] + (" %d!" % waiting[v] if waiting.get(v) else "")
-        out.append("[%s]" % label if v == tool else label)
-    return "  ".join(out)
-
-
 def agent_lines(d, tool, cols, rows, offline, source):
     """The text of one tool's view, at most `rows` lines of at most cols - 1 characters (Terminal wraps a
     full-width line by itself)."""
@@ -122,7 +109,7 @@ def agent_lines(d, tool, cols, rows, offline, source):
     if offline:
         head = "WATCHER OFFLINE since " + d.get("clock", "?")
     tail = (source + " " if source else "") + d.get("clock", "")
-    lines = [pad(head, cols - 12) + rjust(tail, 11), tabs(d, tool, waiting)[:cols - 1]]
+    lines = [pad(head, cols - 12) + rjust(tail, 11)]  # the tool's name heads the view; no tab line
     if not sessions:
         lines.append("no recent %s sessions" % LONG.get(tool, tool))
         lines.append("(the watcher's --hours sets how far back)")

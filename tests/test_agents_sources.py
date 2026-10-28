@@ -411,9 +411,8 @@ class BoardViews(unittest.TestCase):
         lines = views.agent_lines(OLD, "claude", COLS, ROWS, False, "WiFi")
         self.check_fits(lines)
         self.assertTrue(lines[0].startswith("CLAUDE CODE  1 waiting"))
-        self.assertEqual(lines[1], "")  # no other tools: no tab line
-        self.assertTrue(lines[2].startswith("! Old format"))
-        self.assertEqual(lines[3].rstrip(), "  + Explore: find tests")  # an old watcher: no start time
+        self.assertTrue(lines[1].startswith("! Old format"))  # sessions start on line 2: no tab line
+        self.assertEqual(lines[2].rstrip(), "  + Explore: find tests")  # an old watcher: no start time
 
     def test_views_cycle_every_tool_the_watcher_reads(self):
         # opencode has no sessions in NEW but the watcher reads it, so it still gets a view
@@ -432,14 +431,12 @@ class BoardViews(unittest.TestCase):
         claude = views.agent_lines(NEW, "claude", COLS, ROWS, False, "USB")
         self.assertTrue(claude[0].startswith("CLAUDE CODE "))
         self.assertNotIn("waiting", claude[0])
-        self.assertEqual(claude[1], "[Claude]  Codex 2!  opencode")
         codex = views.agent_lines(NEW, "codex", COLS, ROWS, False, "USB")
         self.assertTrue(codex[0].startswith("CODEX  2 waiting"))
         self.assertTrue(codex[0].endswith("USB 12:00"))
-        self.assertEqual(codex[1], "Claude  [Codex 2!]  opencode")
-        self.assertTrue(codex[2].startswith("! Ship it"))
-        self.assertTrue(codex[3].startswith("? xxxx"))
-        self.assertEqual(codex[4].rstrip(), "  + " + "y" * 40)  # worker: generic, so no type
+        self.assertTrue(codex[1].startswith("! Ship it"))
+        self.assertTrue(codex[2].startswith("? xxxx"))
+        self.assertEqual(codex[3].rstrip(), "  + " + "y" * 40)  # worker: generic, so no type
         self.assertIn("    +2 more", codex)
         self.check_fits(claude)
         self.check_fits(codex)
@@ -463,7 +460,7 @@ class BoardViews(unittest.TestCase):
             {"id": "b", "title": "t" * 80, "state": "working", "since": 9990}]}
         lines = views.agent_lines(d, "claude", COLS, ROWS, False, "")
         self.check_fits(lines)
-        self.assertEqual(lines[2:], [
+        self.assertEqual(lines[1:], [
             "! Fix the parser" + " " * 30 + "9m",
             "  + Explore: find tests" + " " * 23 + "2m",
             "  + Find Project Bundle" + " " * 22 + "<1m",
