@@ -59,6 +59,7 @@ def record(info, host):
         "hostname": hostname,
         "mac": mac.group(1) if mac else "",
         "board_id": info.get("board_id", ""),
+        "uid": info.get("UID", ""),  # also in the board's USB serial number / port name
     }
 
 

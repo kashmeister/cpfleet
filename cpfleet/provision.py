@@ -160,27 +160,50 @@ def fat12_image(size, label="CIRCUITPY"):
 
 # ---- boards ---------------------------------------------------------------------------------------
 
+PROBE = ("import sys, board, wifi\nprint(sys.implementation.version[0], board.board_id,"
+         " ''.join('%02x' % b for b in wifi.radio.mac_address))\n")
+TO_ROM = "import microcontroller\nmicrocontroller.on_next_reset(microcontroller.RunMode.BOOTLOADER)\nmicrocontroller.reset()\n"
+
+
+def wifi_twin(port):
+    """The inventory board on this USB port: the port name contains the board's UID (version.json "UID").
+    Used when a board's USB console stops taking input (it happens; a reset clears it) but Wi-Fi works."""
+    for b in inventory.load():
+        if b.get("uid") and b["uid"] in port:
+            return b
+    return None
+
+
+def transport(port, via_wifi):
+    return repl.WebSocket(via_wifi["host"], inventory.password()) if via_wifi else repl.Serial(port)
+
+
 def circuitpython_board(port):
-    """(major version, board_id, MAC) if CircuitPython answers on this port, else None.
-    Asking stops code.py, so it's restarted before returning."""
-    try:
-        with repl.Serial(port) as t:
-            out, err = repl.run(t, "import sys, board, wifi\nprint(sys.implementation.version[0], board.board_id,"
-                                   " ''.join('%02x' % b for b in wifi.radio.mac_address))\n", 5)
-            repl.reload(t)
-    except (repl.ReplError, OSError):
-        return None
-    parts = out.split()
-    return (int(parts[0]), parts[1], parts[2]) if len(parts) == 3 and not err.strip() else None
+    """(major version, board_id, MAC, via_wifi) if CircuitPython answers on this port (over USB, else over
+    Wi-Fi for a known board), else None. Asking stops code.py, so it's restarted before returning."""
+    for via_wifi in (None, wifi_twin(port)):
+        if via_wifi is False:
+            continue
+        try:
+            with transport(port, via_wifi) as t:
+                out, err = repl.run(t, PROBE, 5)
+                repl.reload(t)
+        except (repl.ReplError, OSError, ConnectionError, inventory.InventoryError):
+            if via_wifi is None and wifi_twin(port) is None:
+                return None
+            continue
+        parts = out.split()
+        if len(parts) == 3 and not err.strip():
+            return int(parts[0]), parts[1], parts[2], via_wifi
+    return None
 
 
-def to_rom_bootloader(port):
+def to_rom_bootloader(port, via_wifi=None):
     try:
-        with repl.Serial(port) as t:
-            repl.run(t, "import microcontroller\nmicrocontroller.on_next_reset(microcontroller.RunMode.BOOTLOADER)\n"
-                        "microcontroller.reset()\n", 2)
-    except (repl.ReplError, OSError):
-        pass
+        with transport(port, via_wifi) as t:
+            repl.run(t, TO_ROM, 2)
+    except (repl.ReplError, OSError, ConnectionError):
+        pass  # the board drops the connection as it resets
 
 
 def find_boards(esp, prof, reinstall, only=None, dry_run=False):
@@ -192,7 +215,9 @@ def find_boards(esp, prof, reinstall, only=None, dry_run=False):
         info = circuitpython_board(port)
         if info is None:
             continue
-        major, board_id, mac = info
+        major, board_id, mac, via_wifi = info
+        if via_wifi:
+            print("%s: USB console didn't answer; using %s over Wi-Fi" % (port, via_wifi["name"]))
         if board_id != prof["board_id"]:
             print("%s: %s, not a %s board; leaving it alone" % (port, board_id, prof["board_id"]))
             continue
@@ -202,7 +227,7 @@ def find_boards(esp, prof, reinstall, only=None, dry_run=False):
         if dry_run:
             boards[port] = (mac, keep[mac])
         else:
-            to_rom_bootloader(port)
+            to_rom_bootloader(port, via_wifi)
     if keep and not dry_run:
         time.sleep(4)
     for port in serial_ports():
