@@ -10,3 +10,5 @@ boards.json
 password
 *.img
 *.bin
+# machine-specific notes for agents
+CLAUDE.local.md
