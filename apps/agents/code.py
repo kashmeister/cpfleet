@@ -3,8 +3,11 @@
 #   A: switch between agents and a quote    B: acknowledge (LEDs off until something new waits)
 #   C: another quote (in quote view)
 # The screen redraws at most every AGENTS_REDRAW seconds (default 30) for new data; buttons redraw at once.
-# Set the watcher's address once:  cpfleet settings <boards> set AGENTS_URL http://<mac-ip>:8766/agents.json
-# Built-in modules only (no lib/).
+# Where the data comes from, first match wins:
+#   USB: lines on usb_cdc.data from agents_watch.py --usb (needs CPFLEET_USB_DATA = 1 and a reset; boot.py)
+#   Wi-Fi: AGENTS_URL if set, else the watcher found by name over mDNS (_cpagents._tcp); a failing
+#          AGENTS_URL is looked up again by name. AGENTS_TOKEN, if set, is sent to a watcher that wants one.
+# Built-in modules only (no lib/); usblink.py is this app's USB line protocol.
 import json
 import math
 import os
@@ -20,8 +23,22 @@ import socketpool
 import terminalio
 import wifi
 
-URL = os.getenv("AGENTS_URL")
+import usblink
+
+try:
+    import usb_cdc
+    usb = usb_cdc.data  # None unless boot.py enabled the second USB serial channel
+except ImportError:
+    usb = None
+
+URL = os.getenv("AGENTS_URL")    # an override; without it the watcher is found by name
+TOKEN = os.getenv("AGENTS_TOKEN")
+NAME = os.getenv("CIRCUITPY_WEB_INSTANCE_NAME") or "MagTag"
+SERVICE = "_cpagents"            # the watcher's Bonjour service type, _cpagents._tcp
 POLL = 3            # seconds between fetches
+USB_STALE = 10      # seconds without a USB line before falling back to Wi-Fi
+LOOKUP_EVERY = 30   # seconds between mDNS lookups while there's no working address
+LOOKUP_AFTER = 3    # failed fetches in a row before looking the watcher up again
 FRESH = 3600        # waiting sessions newer than this light the LEDs
 OFFLINE = 30        # seconds without a reply before saying the watcher is offline
 QUOTE_EVERY = 15 * 60
@@ -55,7 +72,8 @@ def fetch(url):
     sock.settimeout(5)
     try:
         sock.connect(pool.getaddrinfo(host, port)[0][4])
-        sock.send(("GET /%s HTTP/1.0\r\nHost: %s\r\n\r\n" % (path, host)).encode())
+        auth = "Authorization: Bearer %s\r\n" % TOKEN if TOKEN else ""
+        sock.send(("GET /%s HTTP/1.0\r\nHost: %s\r\n%s\r\n" % (path, host, auth)).encode())
         data, chunk = bytearray(), bytearray(1024)
         while True:
             n = sock.recv_into(chunk)
@@ -68,6 +86,39 @@ def fetch(url):
     if b" 200 " not in head.split(b"\r\n")[0]:
         raise OSError("watcher replied " + head.split(b"\r\n")[0].decode())
     return json.loads(body)
+
+
+mdns_server = None  # one for the whole run: deinit could stop the web workflow's own mDNS
+
+
+def discover():
+    """The watcher's URL from its Bonjour advertisement, or None."""
+    global mdns_server
+    try:
+        import mdns
+        if mdns_server is None:
+            mdns_server = mdns.Server(wifi.radio)
+        for r in mdns_server.find(service_type=SERVICE, protocol="_tcp", timeout=2):
+            if r.ipv4_address and r.port:
+                return "http://%s:%d/agents.json" % (r.ipv4_address, r.port)
+    except Exception as e:
+        print("lookup failed:", e)
+    return None
+
+
+def read_usb():
+    """The newest snapshot among the lines waiting on the USB data channel, or None. Answers probes."""
+    n = usb.in_waiting
+    if not n:
+        return None
+    snap = None
+    for line in reader.feed(usb.read(n)):
+        kind, value = usblink.parse(line)
+        if kind == "probe":
+            usb.write(usblink.hello(NAME))
+        elif kind == "snapshot":
+            snap = value
+    return snap
 
 
 def age(seconds):
@@ -86,7 +137,7 @@ SYMBOL = {"question": "?", "your-turn": "!", "busy": "~", "working": ">", "idle"
 LABEL = {"your-turn": "your turn", "busy": "busy?", "working": "working", "idle": "idle"}
 
 
-def agent_lines(d, cols, rows, offline_since):
+def agent_lines(d, cols, rows, offline_since, source):
     sessions = d.get("sessions", [])
     gen = d.get("generated", 0)
     head = "AGENTS"
@@ -94,7 +145,8 @@ def agent_lines(d, cols, rows, offline_since):
         head += "  %d waiting" % d["waiting"]
     if offline_since:
         head = "WATCHER OFFLINE since " + d.get("clock", "?")
-    lines = [pad(head, cols - 6) + rjust(d.get("clock", ""), 5), ""]
+    tail = (source + " " if source else "") + d.get("clock", "")
+    lines = [pad(head, cols - 12) + rjust(tail, 11), ""]
     if not sessions:
         lines.append("no Claude Code sessions in the last hours")
     for s in sessions:
@@ -186,16 +238,42 @@ quote_at = time.monotonic()
 view, data, shown, acked = "agents", {}, None, set()
 last_draw, force = -REDRAW, True
 last_fetch, last_ok = -POLL, time.monotonic()
+url, fails, last_lookup = URL, 0, -LOOKUP_EVERY
+reader, last_usb, source = usblink.LineReader(), None, ""
+was_known = False
+if usb:
+    usb.timeout, usb.write_timeout = 0, 0.2
 
 while True:
     now = time.monotonic()
-    if URL and now - last_fetch >= POLL:
-        last_fetch = now
+    if usb:
         try:
-            data = fetch(URL)
-            last_ok = now
-        except Exception as e:  # keep showing the last data
-            print("fetch failed:", e)
+            snap = read_usb()
+        except Exception as e:
+            snap = None
+            print("usb read failed:", e)
+        if snap is not None:
+            if last_usb is None or now - last_usb >= USB_STALE:
+                print("data from USB")
+            data, last_ok, last_usb, source = snap, now, now, "USB"
+    usb_fresh = last_usb is not None and now - last_usb < USB_STALE
+    if not usb_fresh and now - last_fetch >= POLL and wifi.radio.ipv4_address:
+        last_fetch = now
+        if (url is None or fails >= LOOKUP_AFTER) and now - last_lookup >= LOOKUP_EVERY:
+            last_lookup = now
+            found = discover()
+            if found and found != url:
+                print("watcher found at", found)
+                url, fails = found, 0
+        if url:
+            try:
+                data = fetch(url)
+                if source != "WiFi":
+                    print("data from Wi-Fi:", url)
+                last_ok, fails, source = now, 0, "WiFi"
+            except Exception as e:  # keep showing the last data
+                fails += 1
+                print("fetch failed:", e)
 
     event = keys.events.get()
     if event and event.pressed:
@@ -209,7 +287,10 @@ while True:
     if view == "quote" and now - quote_at > QUOTE_EVERY:
         quote, quote_at = random.choice(quotes), now
 
-    offline = URL and now - last_ok > OFFLINE
+    known = bool(url) or last_usb is not None
+    if known and not was_known:  # replace the "looking for the watcher" screen at once
+        force, was_known = True, True
+    offline = known and now - last_ok > OFFLINE
     gen = data.get("generated", 0)
     waiting = [s for s in data.get("sessions", []) if s["state"] in ("question", "your-turn")
                and gen - s["since"] < FRESH and (s["id"], s["since"]) not in acked]
@@ -221,12 +302,14 @@ while True:
     else:
         leds(0, 0, 0)
 
-    if not URL:
-        lines, scale = ["Set the watcher address:", "cpfleet settings <board> set", "AGENTS_URL",
-                        "http://<mac-ip>:8766/agents.json", "then cpfleet reset <board>"], 1
+    if not known:
+        lines, scale = ["Looking for the agents watcher...", "",
+                        "Start extras/agents_watch.py on the Mac", "(Wi-Fi, found by name), or with --usb",
+                        "and plug this board into it. Or set",
+                        "AGENTS_URL http://<mac-ip>:8766/agents.json"], 1
     elif view == "agents":
         cols, rows = display.width // CW, display.height // CH
-        lines, scale = agent_lines(data, cols, rows, offline), 1
+        lines, scale = agent_lines(data, cols, rows, offline, source), 1
     else:
         cols, rows = display.width // (CW * 2), display.height // (CH * 2)
         lines, scale = quote_lines(quote, cols, rows), 2

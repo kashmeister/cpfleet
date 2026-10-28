@@ -25,6 +25,8 @@ git-ignored.
 8. **Use raw REPL** (Ctrl-A … Ctrl-D, small chunks) for code; typing into the friendly REPL loses newlines and characters. A board that is auto-reloading after a file write ignores the first interrupts (`repl.enter_raw` retries). `repl.reload` must wait for "soft reboot", or closing the connection drops the Ctrl-D.
 9. **CircuitPython strings have no `rjust`** (and no reliable `center`), and `terminalio.Terminal` wraps a full-width line by itself. Device code in `apps/` has to allow for both.
 10. **Downloads need a non-default User-Agent:** Adafruit Learn returns 403 to Python's.
+11. **The USB data channel** (`usb_cdc.enable(console=True, data=True)` in `boot.py`, behind `CPFLEET_USB_DATA`) needs `usb_hid` and `usb_midi` off on the ESP32-S2, which is short of USB endpoints. It takes a hard reset (`cpfleet reset`); a soft reload keeps it, and keeps the ports. macOS then shows two ports per board, named alike but for the last digit: the console ends in `1`, the data channel in `3`. The data port doesn't answer the REPL, so `provision.serial_ports` lists only the first port of each pair.
+12. **mDNS on the board:** `mdns.Server(wifi.radio)` works alongside the web workflow's own; keep one for the whole run rather than deinit it. `find()` right after a service has registered can come back empty, so look again later rather than giving up.
 
 ## Layout
 
@@ -38,7 +40,8 @@ git-ignored.
 - `bundle.py`: Adafruit Project Bundles.
 - `profiles/*.json`: board profiles.
 - `board_files/boot.py`: the `boot.py` that provisioning installs.
-- `apps/`: device programs.
+- `apps/`: device programs. `apps/agents/usblink.py` is the USB line protocol the board shares with `extras/agents_watch.py`; the tests import it.
+- `extras/agents_watch.py`: the host side of `apps/agents` (HTTP, Bonjour via `dns-sd`, USB).
 - `tests/`.
 
 ## Releasing
