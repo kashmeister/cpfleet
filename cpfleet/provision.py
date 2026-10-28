@@ -208,11 +208,11 @@ def to_rom_bootloader(port, via_wifi=None):
         pass  # the board drops the connection as it resets
 
 
-def find_boards(esp, prof, reinstall, only=None, dry_run=False):
-    """Find boards on USB and put them into ROM download mode (not on a dry run).
-    Returns {port: (mac, keep_firmware)}. `only`: MAC suffixes to limit it to."""
+def find_boards(esp, prof, reinstall, only=None):
+    """Probe the boards on USB without changing anything (code.py is restarted after asking).
+    Returns [{port, mac, keep, via, in_rom}]; `only`: MAC suffixes to limit it to."""
     wanted = lambda mac: not only or any(mac.endswith(s.lower()) for s in only)
-    keep, boards = {}, {}
+    found, probed = [], set()
     for port in serial_ports():
         twin = wifi_twin(port)
         if twin and twin.get("mac") and not wanted(twin["mac"]):
@@ -220,28 +220,44 @@ def find_boards(esp, prof, reinstall, only=None, dry_run=False):
         info = circuitpython_board(port)
         if info is None:
             continue
-        major, board_id, mac, via_wifi = info
-        if via_wifi:
-            print("%s: USB console didn't answer; using %s over Wi-Fi" % (port, via_wifi["name"]))
+        probed.add(port)
+        major, board_id, mac, via = info
+        if via:
+            print("%s: USB console didn't answer; using %s over Wi-Fi" % (port, via["name"]))
         if board_id != prof["board_id"]:
             print("%s: %s, not a %s board; leaving it alone" % (port, board_id, prof["board_id"]))
-            continue
-        if not wanted(mac):
-            continue
-        keep[mac] = major >= 10 and not reinstall
-        if dry_run:
-            boards[port] = (mac, keep[mac])
-        else:
-            to_rom_bootloader(port, via_wifi)
-    if keep and not dry_run:
-        time.sleep(4)
+        elif wanted(mac):
+            found.append({"port": port, "mac": mac, "keep": major >= 10 and not reinstall, "via": via,
+                          "in_rom": False})
     for port in serial_ports():
-        if port in boards:
-            continue
-        mac = esp.mac(port)
-        if mac and wanted(mac):
-            boards[port] = (mac, keep.get(mac, False))
-    return boards
+        if port not in probed:
+            mac = esp.mac(port)
+            if mac and wanted(mac):
+                found.append({"port": port, "mac": mac, "keep": False, "via": None, "in_rom": True})
+    return found
+
+
+def into_rom(esp, board, circuitpython_ports):
+    """Switch a board into ROM download mode just before flashing it and return its ROM port. A board
+    switched by software doesn't stay in download mode for long, so this happens per board, not up front."""
+    if board["in_rom"]:
+        return board["port"]
+    to_rom_bootloader(board["port"], board["via"])
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        time.sleep(1)
+        for port in serial_ports():
+            if port not in circuitpython_ports and esp.mac(port) == board["mac"]:
+                return port
+    die("%s didn't come up in download mode; hold Boot, press and release Reset, release Boot, and run "
+        "this again" % board["mac"])
+
+
+def show_plan(found):
+    print("Boards:")
+    for b in found:
+        print("  %-30s %s  %s" % (b["port"], b["mac"], "keep firmware, rewrite boot.py and settings.toml"
+                                  if b["keep"] else "back up flash, install TinyUF2 + CircuitPython, write files"))
 
 
 def ask_settings():
@@ -276,33 +292,30 @@ def main(a):
     esp = Esp(prof["chip"])
     mcopy = tool("mcopy", "brew install mtools")
     mtype = tool("mtype", "brew install mtools")
-    boards = find_boards(esp, prof, a.reinstall, a.only, a.dry_run)
-    if not boards:
+    found = find_boards(esp, prof, a.reinstall, a.only)
+    if not found:
         die("no board in download mode or running CircuitPython on USB. Put one in download mode "
             "(MagTag: hold Boot, press and release Reset, release Boot) and run this again.")
-    print("Boards:")
-    for port, (mac, keep) in boards.items():
-        print("  %-28s %s  %s" % (port, mac, "keep firmware, rewrite boot.py and settings.toml" if keep else
-                                  "back up flash, install TinyUF2 + CircuitPython, write files"))
-    if a.dry_run:
-        return
-    if not a.yes and input("Provision them? [y/N] ").strip().lower() != "y":
+    show_plan(found)
+    if a.dry_run or (not a.yes and input("Provision them? [y/N] ").strip().lower() != "y"):
         return
     ssid, wifi_pw, web_pw = ask_settings()
-    needs_fw = [p for p, (_, keep) in boards.items() if not keep]
-    if needs_fw:
+    CACHE.mkdir(parents=True, exist_ok=True)
+    if not all(b["keep"] for b in found):  # download before touching any board
         cp_bin, cp_ver = circuitpython_bin(prof)
         uf2_bin, uf2_ver = tinyuf2_combined(prof)
         ota = CACHE / "otadata-ota0.bin"
         ota.write_bytes(otadata(prof["otadata_size"]))
         print("   CircuitPython %s, TinyUF2 %s" % (cp_ver, uf2_ver))
-    CACHE.mkdir(parents=True, exist_ok=True)
-    for port, (mac, keep) in boards.items():
+    cp_ports = {b["port"] for b in found if not b["in_rom"]}
+    for b in found:
+        mac = b["mac"]
         name = a.name.format(prefix=prof["name_prefix"], mac4=mac[-4:], mac=mac)
-        print("== %s (%s)" % (name, port))
+        print("== %s" % name)
+        port = into_rom(esp, b, cp_ports)
         with tempfile.NamedTemporaryFile(dir=CACHE, suffix=".img") as tmp:  # holds passwords; deleted after
             img = Path(tmp.name)
-            if keep:
+            if b["keep"]:
                 esp(port, "read-flash", hex(prof["ffat_offset"]), hex(prof["ffat_size"]), str(img))
             else:
                 BACKUPS.mkdir(parents=True, exist_ok=True)
@@ -328,17 +341,19 @@ def firmware(a):
     """Update CircuitPython on USB boards and keep their files: write the new .bin, then the boot selector."""
     prof = load_profile(a.profile)
     esp = Esp(prof["chip"])
-    boards = find_boards(esp, prof, False, a.only, a.dry_run)
-    if not boards:
+    found = find_boards(esp, prof, False, a.only)
+    if not found:
         die("no board found on USB")
     cp_bin, cp_ver = circuitpython_bin(prof, a.cp_version)
-    print("Install CircuitPython %s on: %s" % (cp_ver, ", ".join("%s (%s)" % (m, p) for p, (m, _) in boards.items())))
+    print("Install CircuitPython %s on: %s" % (cp_ver, ", ".join(b["mac"] for b in found)))
     if a.dry_run or (not a.yes and input("Go ahead? [y/N] ").strip().lower() != "y"):
         return
     ota = CACHE / "otadata-ota0.bin"
     ota.write_bytes(otadata(prof["otadata_size"]))
-    for port, (mac, _) in boards.items():
+    cp_ports = {b["port"] for b in found if not b["in_rom"]}
+    for b in found:
+        port = into_rom(esp, b, cp_ports)
         esp(port, "write-flash", "0x0", str(cp_bin))
         esp(port, "write-flash", hex(prof["otadata_offset"]), str(ota))
-        print("%s: CircuitPython %s written" % (mac, cp_ver))
+        print("%s: CircuitPython %s written" % (b["mac"], cp_ver))
     print("Press Reset on each board.")
