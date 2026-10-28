@@ -48,10 +48,14 @@ def waiting_by_tool(d):
 
 
 def views(d):
-    """The views button A cycles through: Claude and the quote always, Codex and opencode when the
-    snapshot has sessions of theirs."""
-    have = set(tool_of(s) for s in d.get("sessions", []))
-    return [v for v in CYCLE if v in ("claude", "quote") or v in have]
+    """The views button A cycles through: every tool the watcher reads (its "tools" field lists them, even
+    with no sessions, so a quiet tool still has a view), then the quote. An older watcher without that
+    field: Claude, plus any tool that has sessions."""
+    if isinstance(d.get("tools"), dict) and d["tools"]:
+        have = set(d["tools"]) | set(tool_of(s) for s in d.get("sessions", []))
+    else:
+        have = set(["claude"]) | set(tool_of(s) for s in d.get("sessions", []))
+    return [v for v in CYCLE if v == "quote" or v in have]
 
 
 def next_view(view, d):
@@ -120,7 +124,8 @@ def agent_lines(d, tool, cols, rows, offline, source):
     tail = (source + " " if source else "") + d.get("clock", "")
     lines = [pad(head, cols - 12) + rjust(tail, 11), tabs(d, tool, waiting)[:cols - 1]]
     if not sessions:
-        lines.append("no %s sessions in the last hours" % LONG.get(tool, tool))
+        lines.append("no recent %s sessions" % LONG.get(tool, tool))
+        lines.append("(the watcher's --hours sets how far back)")
     for s in sessions:
         state = s.get("state")
         if state not in SYMBOL:

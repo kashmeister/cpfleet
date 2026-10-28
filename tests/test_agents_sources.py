@@ -415,22 +415,28 @@ class BoardViews(unittest.TestCase):
         self.assertTrue(lines[2].startswith("! Old format"))
         self.assertEqual(lines[3].rstrip(), "  + Explore: find tests")  # an old watcher: no start time
 
-    def test_views_cycle_and_skip_empty_tools(self):
-        self.assertEqual(views.views(NEW), ["claude", "codex", "quote"])
+    def test_views_cycle_every_tool_the_watcher_reads(self):
+        # opencode has no sessions in NEW but the watcher reads it, so it still gets a view
+        self.assertEqual(views.views(NEW), ["claude", "codex", "opencode", "quote"])
         self.assertEqual(views.next_view("claude", NEW), "codex")
-        self.assertEqual(views.next_view("codex", NEW), "quote")
-        self.assertEqual(views.next_view("opencode", NEW), "quote")  # its sessions went away
+        self.assertEqual(views.next_view("codex", NEW), "opencode")
+        self.assertEqual(views.next_view("opencode", NEW), "quote")
+        empty = views.agent_lines(NEW, "opencode", COLS, ROWS, False, "USB")
+        self.assertIn("no recent opencode sessions", empty)
+        self.check_fits(empty)
+        only_claude = dict(NEW, tools={"claude": {"n": 1, "waiting": 1}})
+        self.assertEqual(views.views(only_claude), ["claude", "codex", "quote"])  # codex: it has sessions
         self.assertEqual(views.views({}), ["claude", "quote"])
 
     def test_headers_mark_the_views_that_wait(self):
         claude = views.agent_lines(NEW, "claude", COLS, ROWS, False, "USB")
         self.assertTrue(claude[0].startswith("CLAUDE CODE "))
         self.assertNotIn("waiting", claude[0])
-        self.assertEqual(claude[1], "[Claude]  Codex 2!")
+        self.assertEqual(claude[1], "[Claude]  Codex 2!  opencode")
         codex = views.agent_lines(NEW, "codex", COLS, ROWS, False, "USB")
         self.assertTrue(codex[0].startswith("CODEX  2 waiting"))
         self.assertTrue(codex[0].endswith("USB 12:00"))
-        self.assertEqual(codex[1], "Claude  [Codex 2!]")
+        self.assertEqual(codex[1], "Claude  [Codex 2!]  opencode")
         self.assertTrue(codex[2].startswith("! Ship it"))
         self.assertTrue(codex[3].startswith("? xxxx"))
         self.assertEqual(codex[4].rstrip(), "  + " + "y" * 40)  # worker: generic, so no type
@@ -439,7 +445,7 @@ class BoardViews(unittest.TestCase):
         self.check_fits(codex)
         empty = views.agent_lines(NEW, "opencode", COLS, ROWS, True, "WiFi")
         self.assertTrue(empty[0].startswith("WATCHER OFFLINE since 12:00"))
-        self.assertIn("no opencode sessions in the last hours", empty)
+        self.assertIn("no recent opencode sessions", empty)
 
     def test_many_sessions_fit(self):
         d = dict(NEW, sessions=[dict(NEW["sessions"][1], id=str(i)) for i in range(8)])
