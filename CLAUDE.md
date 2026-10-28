@@ -28,6 +28,16 @@ git-ignored.
 11. **The USB data channel** (`usb_cdc.enable(console=True, data=True)` in `boot.py`, behind `CPFLEET_USB_DATA`) needs `usb_hid` and `usb_midi` off on the ESP32-S2, which is short of USB endpoints. It takes a hard reset (`cpfleet reset`); a soft reload keeps it, and keeps the ports. macOS then shows two ports per board, named alike but for the last digit: the console ends in `1`, the data channel in `3`. The data port doesn't answer the REPL, so `provision.serial_ports` lists only the first port of each pair.
 12. **mDNS on the board:** `mdns.Server(wifi.radio)` works alongside the web workflow's own; keep one for the whole run rather than deinit it. `find()` right after a service has registered can come back empty, so look again later rather than giving up.
 
+## Agent tools' on-disk formats (for `extras/agents_watch.py`; read-only, always)
+
+- **Codex** (0.15x): one rollout per thread, `~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl`. The first line is `session_meta` (tens of KB). Turns are `event_msg` `task_started` … `task_complete` / `turn_aborted`; tool calls are `response_item` `function_call` / `custom_tool_call`, answered by `*_output` with the same `call_id`. Every line has a UTC `timestamp`.
+  - **The desktop app appends `thread_settings_applied` to old rollouts when it starts,** so a file's mtime isn't activity: use the last other entry's timestamp.
+  - **No approval events are logged.** `request_user_input_async` returns at once, so it doesn't mean waiting either.
+  - **`session_meta.source`:** `"vscode"`, `"cli"`, `"exec"`, or `{"subagent": {"thread_spawn": {"parent_thread_id", "agent_role", "agent_nickname", …}}}` for a sub-thread, `{"subagent": {"other": "guardian"}}` for the app's approval reviewer. `thread_source` `"automation"` marks scheduled runs. A file name with two ids (`…-<id>_<id>.jsonl`) is an ordinary thread (the first id); it isn't a sub-thread.
+  - **Titles:** `session_index.jsonl` (`id`, `thread_name`; the last line per id wins). In `state_5.sqlite`, `threads.name` is the same name but `threads.title` is the **first prompt**: never read or show it. `threads.archived`, and `thread_spawn_edges` (`parent_thread_id`, `child_thread_id`, `status` `open`/…).
+- **opencode** (1.3): `~/.local/share/opencode/opencode.db`, SQLite in WAL mode. `session` (`parent_id` set for a subagent's child session, titled `<desc> (@<agent> subagent)`; `time_archived`), `message` (`data`: `role`, `time.created`/`completed`, `finish`, `error`, `agent`), `part` (`data.type` `tool`: `tool`, `state.status` `pending`/`running`/`completed`/`error`). The `question` tool asks the user. The `permission` table holds saved rules per project, not pending prompts. Times are ms epoch. `~/.local/share/opencode/storage` is the old JSON storage.
+- **SQLite:** open with `file:<path>?mode=ro` (URI), a short timeout, retry "locked"/"busy", and close after each scan.
+
 ## Layout
 
 - `cpfleet/cli.py`: commands.
@@ -40,8 +50,8 @@ git-ignored.
 - `bundle.py`: Adafruit Project Bundles.
 - `profiles/*.json`: board profiles.
 - `board_files/boot.py`: the `boot.py` that provisioning installs.
-- `apps/`: device programs. `apps/agents/usblink.py` is the USB line protocol the board shares with `extras/agents_watch.py`; the tests import it.
-- `extras/agents_watch.py`: the host side of `apps/agents` (HTTP, Bonjour via `dns-sd`, USB).
+- `apps/`: device programs. `apps/agents/usblink.py` is the USB line protocol the board shares with `extras/agents_watch.py`, and `apps/agents/views.py` its screens; the tests import both.
+- `extras/agents_watch.py`: the host side of `apps/agents` (sources `claude`, `codex`, `opencode`; HTTP, Bonjour via `dns-sd`, USB).
 - `tests/`.
 
 ## Releasing

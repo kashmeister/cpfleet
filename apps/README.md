@@ -6,16 +6,30 @@ Each folder is pushed to boards as is: `cpfleet push apps/<name> --to <boards>`.
 |---|---|---|
 | [quotes](quotes) | Adafruit MagTag | A random quote from `quotes.txt` every 15 minutes; button A shows another. Built-in modules only (no `lib/`). Edit `quotes.txt` (`text \| author` per line, plain ASCII) and push again. |
 
-| [agents](agents) | Adafruit MagTag | Your Claude Code sessions and their running subagents, with the LEDs pulsing amber while one waits for you. Needs `extras/agents_watch.py` running on the Mac where Claude Code runs. A: switch to a quote and back; B: acknowledge; C: another quote. |
+| [agents](agents) | Adafruit MagTag | Your Claude Code, Codex and opencode sessions and their subagents, one view per tool, with the LEDs pulsing amber while one waits for you. Needs `extras/agents_watch.py` running on the Mac where they run. A: next view (Claude, Codex, opencode, a quote); B: acknowledge; C: another quote. |
 
-### Claude Code agents display
+### Coding agents display (Claude Code, Codex, opencode)
 
-`extras/agents_watch.py`, on the computer running Claude Code, **only reads** Claude Code's session files in `~/.claude/projects`:
-- a session's transcript, as it's appended;
-- its `custom-title.json`;
-- its `subagents/*.meta.json`.
+`extras/agents_watch.py`, on the computer running the agents, **only reads** what each tool already keeps:
+- **Claude Code**, in `~/.claude/projects`: a session's transcript as it's appended, its `custom-title.json` and its `subagents/*.meta.json`.
+- **Codex**: the rollouts in `~/.codex/sessions/YYYY/MM/DD/`, titles from `~/.codex/session_index.jsonl`, and archived threads and sub-thread links from `~/.codex/state_5.sqlite` (opened read-only). `~/.codex/archived_sessions` is ignored.
+- **opencode**: `~/.local/share/opencode/opencode.db` (opened read-only): sessions that aren't archived, their latest message and its tool calls, and child sessions (subagents).
 
-It serves a compact `/agents.json` on your network and advertises it over Bonjour as `_cpagents._tcp` (with macOS's own `dns-sd`). No hooks or settings changes are involved. The MagTags find it by name, fetch it every 3 seconds and light their LEDs at once. To spare the e-ink panel, they redraw at most every 30 seconds for new data (`cpfleet settings <b> set AGENTS_REDRAW 60` to change that per board); button presses redraw straight away. The header shows where the data comes from (`WiFi` or `USB`) next to the watcher's clock.
+A tool that isn't installed, or has nothing in the last `--hours` (3), is left out; a database that is locked or unreadable is skipped for that scan, and the others carry on. `--sources claude,codex` reads only those. The databases are opened read-only (`mode=ro`); nothing of any tool's settings is touched.
+
+It serves a compact `/agents.json` on your network and advertises it over Bonjour as `_cpagents._tcp` (with macOS's own `dns-sd`). No hooks or settings changes are involved. The MagTags find it by name, fetch it every 3 seconds and light their LEDs at once. To spare the e-ink panel, they redraw at most every 30 seconds for new data (`cpfleet settings <b> set AGENTS_REDRAW 60` to change that per board); button presses redraw straight away. The header names the view's tool and how many of its sessions wait, with where the data comes from (`WiFi` or `USB`) and the watcher's clock on the right. When more than one tool has sessions, the second line lists the views, the current one in brackets, each with its waiting count, so you can tell which view the LEDs are about:
+
+```
+CLAUDE CODE  2 waiting                WiFi 14:05
+[Claude 2!]  Codex 1!  opencode
+! Fix the parser                              9m
+  + Explore: find tests                       2m
+  ✓ write the summary
+> Port the board app
+. Release notes
+```
+
+Button A goes Claude, Codex, opencode, quote; a tool's view is skipped while it has no sessions. A watcher from before Codex and opencode support sends no `tool`, and its sessions show as Claude's.
 
 ```sh
 python3 extras/agents_watch.py                    # serves http://0.0.0.0:8766/agents.json and advertises it
@@ -49,19 +63,25 @@ python3 extras/agents_watch.py --usb                   # HTTP and USB; --no-http
 | `AGENTS_REDRAW` | 30 | Minimum seconds between e-ink redraws for new data |
 | `CPFLEET_USB_DATA` | off | `1`: turn on the USB data channel at boot (`boot.py`; needs a reset) |
 
+Each row starts with a symbol for its state; a waiting row ends with how long it has waited (`<1m`, `9m`, `2h`).
+
 | Symbol | State | Meaning |
 |---|---|---|
-| `?` | question | An `AskUserQuestion` or plan approval is open |
-| `!` | your turn | The session finished its turn |
-| `~` | busy? | A tool call has had no result for 20 s or more. It's either a long command or a permission prompt; transcripts can't tell those apart. |
-| `>` | working | The session is writing its transcript, or a subagent is running |
-| `.` | idle | Nothing for 30 s or more, and not waiting |
+| `?` | question | Claude's `AskUserQuestion` or plan approval, or opencode's `question` tool (also in a subagent), is open |
+| `!` | your turn | The session finished its turn (or was stopped) |
+| `~` | busy? | A tool call has had no result for 20 s or more. It's either a long command or a permission prompt; none of the three tools' logs tell those apart (opencode's `permission` table holds saved rules, not pending prompts). |
+| `>` | working | The session is writing, or a subagent is running |
+| `.` | idle | Nothing for a while, and not waiting. Codex runs nobody waits for (`codex exec`, the app's automations) are idle when done. |
+| `+` | subagent | A running subagent (Claude's subagents, Codex's sub-threads, opencode's child sessions), and how long it has run. Its type is shown only when it says something (`Explore:`, `Plan:`), not `general-purpose` and the like. |
+| `✓` | subagent | One that finished in the last 5 minutes (drawn: the board's font has no check mark) |
+
+At most 8 sessions per tool and 3 subagents per session are sent; the header counts them all.
 
 **LEDs:**
 - **Pulsing amber:** a session has been waiting for less than an hour and hasn't been acknowledged (B).
 - **Dim red:** no reply from the watcher for 30 s.
 
-**Privacy.** The watcher shares session titles and subagent descriptions with anything that can reach the port, and the Bonjour advertisement tells the whole local network that it's there (`--no-advertise` stops that; boards then need `AGENTS_URL`). Run it only on a trusted network, or pass `--bind` with a specific address. A token keeps casual visitors out:
+**Privacy.** The watcher shares session titles (from all three tools) and subagent descriptions with anything that can reach the port, never prompts or messages (Codex's database keeps a thread's first prompt as `title`; the watcher never reads it, and uses the thread name or the folder instead), and the Bonjour advertisement tells the whole local network that it's there (`--no-advertise` stops that; boards then need `AGENTS_URL`). Run it only on a trusted network, or pass `--bind` with a specific address. A token keeps casual visitors out:
 
 ```sh
 AGENTS_TOKEN=<something long> python3 extras/agents_watch.py    # in the environment, so it isn't in `ps`
