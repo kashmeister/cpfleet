@@ -200,12 +200,24 @@ def circuitpython_board(port):
     return None
 
 
-def to_rom_bootloader(port, via_wifi=None):
-    try:
-        with transport(port, via_wifi) as t:
-            repl.run(t, TO_ROM, 2)
-    except (repl.ReplError, OSError, ConnectionError):
-        pass  # the board drops the connection as it resets
+def to_rom_bootloader(port, via_wifi=None, wait=20):
+    """Ask CircuitPython to reboot into the ROM bootloader: over USB, else over Wi-Fi for a known board
+    (retried while a board that just rebooted rejoins Wi-Fi). Returns True once a console took the command."""
+    routes = [via_wifi] if via_wifi else [None] + ([wifi_twin(port)] if wifi_twin(port) else [])
+    deadline = time.monotonic() + wait
+    while True:
+        for via in routes:
+            try:
+                with transport(port, via) as t:
+                    repl.enter_raw(t, attempts=2)
+                    t.write(TO_ROM.encode() + b"\x04")
+                    time.sleep(0.5)
+                return True
+            except (repl.ReplError, OSError, ConnectionError, inventory.InventoryError):
+                continue
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(2)
 
 
 def find_boards(esp, prof, reinstall, only=None):
@@ -238,16 +250,20 @@ def find_boards(esp, prof, reinstall, only=None):
 
 
 def into_rom(esp, board, circuitpython_ports):
-    """Switch a board into ROM download mode just before flashing it and return its ROM port.
+    """Switch a board into ROM download mode and return its ROM port; the next esptool command must start
+    at once.
 
-    After a software switch the chip's RTC watchdog is still armed. Only esptool commands that load its
-    flasher stub (read-flash, write-flash, erase-flash) disarm it, so this mustn't identify the port with
-    chip-id (that lets the board reboot out of download mode seconds later), and the caller's next esptool
-    command must follow at once. The board's ROM port is the one new port that appears."""
+    A board switched by software doesn't stay in download mode: it reboots a few seconds after each esptool
+    session ends (and after a chip-id). So every esptool step is its own session, started right after a
+    switch (see rom_session). The ROM port is recognised as the one new port that appears, not with chip-id."""
     if board["in_rom"]:
         return board["port"]
+    deadline = time.monotonic() + 20  # a board that just left download mode is still rebooting
+    while board["port"] not in serial_ports() and time.monotonic() < deadline:
+        time.sleep(0.5)
     before = set(serial_ports())
-    to_rom_bootloader(board["port"], board["via"])
+    if not to_rom_bootloader(board["port"], board["via"]):
+        die("couldn't reach %s over USB or Wi-Fi to switch it to download mode" % board["mac"])
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         time.sleep(0.5)
@@ -257,6 +273,30 @@ def into_rom(esp, board, circuitpython_ports):
             return new[0]
     die("%s didn't come up in download mode; hold Boot, press and release Reset, release Boot, and run "
         "this again" % board["mac"])
+
+
+def rom_session(esp, board, circuitpython_ports, *args):
+    """One esptool command in download mode, switching the board in first (again, if it has left)."""
+    for attempt in range(3):
+        port = into_rom(esp, board, circuitpython_ports)
+        r = esp(port, *args, check=False)
+        if r.returncode == 0:
+            return r
+        if board["in_rom"]:
+            break
+        time.sleep(3)  # it left download mode; let it reboot into CircuitPython, then switch it again
+    die("esptool %s failed on %s: %s" % (args[0], board["mac"], (r.stderr or r.stdout).strip().splitlines()[-3:]))
+
+
+def full_image(prof, uf2_bin, cp_bin, files_img):
+    """The whole flash in one image, written in one esptool session: TinyUF2 (bootloader, partition table,
+    uf2 partition), CircuitPython over it (same layout), the boot selector, and the CIRCUITPY file system."""
+    img = bytearray(b"\xff" * prof["flash_size"])
+    for offset, data in ((0, uf2_bin.read_bytes()), (0, cp_bin.read_bytes()),
+                         (prof["otadata_offset"], otadata(prof["otadata_size"])),
+                         (prof["ffat_offset"], files_img.read_bytes())):
+        img[offset:offset + len(data)] = data
+    return bytes(img)
 
 
 def show_plan(found):
@@ -310,41 +350,41 @@ def main(a):
     if not all(b["keep"] for b in found):  # download before touching any board
         cp_bin, cp_ver = circuitpython_bin(prof)
         uf2_bin, uf2_ver = tinyuf2_combined(prof)
-        ota = CACHE / "otadata-ota0.bin"
-        ota.write_bytes(otadata(prof["otadata_size"]))
         print("   CircuitPython %s, TinyUF2 %s" % (cp_ver, uf2_ver))
     cp_ports = {b["port"] for b in found if not b["in_rom"]}
     for b in found:
         mac = b["mac"]
         name = a.name.format(prefix=prof["name_prefix"], mac4=mac[-4:], mac=mac)
         print("== %s" % name)
-        port = into_rom(esp, b, cp_ports)
-        with tempfile.NamedTemporaryFile(dir=CACHE, suffix=".img") as tmp:  # holds passwords; deleted after
-            img = Path(tmp.name)
+        # These temporary files hold the passwords; they're blanked and deleted afterwards.
+        with tempfile.NamedTemporaryFile(dir=CACHE, suffix=".img") as files, \
+                tempfile.NamedTemporaryFile(dir=CACHE, suffix=".bin") as whole:
+            img = Path(files.name)
             if b["keep"]:
-                esp(port, "read-flash", hex(prof["ffat_offset"]), hex(prof["ffat_size"]), str(img))
+                rom_session(esp, b, cp_ports, "read-flash", hex(prof["ffat_offset"]), hex(prof["ffat_size"]), str(img))
+                write_files(img, prof, name, ssid, wifi_pw, web_pw, mcopy, mtype)
+                r = rom_session(esp, b, cp_ports, "write-flash", hex(prof["ffat_offset"]), str(img))
             else:
                 BACKUPS.mkdir(parents=True, exist_ok=True)
                 backup = BACKUPS / ("flash-%s.bin" % mac)
                 if not backup.exists():
                     print("   backing up flash to " + str(backup))
-                    esp(port, "read-flash", "0", hex(prof["flash_size"]), str(backup))
-                print("   installing firmware")
-                esp(port, "erase-flash")
-                esp(port, "write-flash", "0x0", str(uf2_bin))
-                esp(port, "write-flash", "0x0", str(cp_bin))
-                esp(port, "write-flash", hex(prof["otadata_offset"]), str(ota))
+                    rom_session(esp, b, cp_ports, "read-flash", "0", hex(prof["flash_size"]), str(backup))
                 img.write_bytes(fat12_image(prof["ffat_size"]))
-            write_files(img, prof, name, ssid, wifi_pw, web_pw, mcopy, mtype)
-            r = esp(port, "write-flash", hex(prof["ffat_offset"]), str(img))
-            print("   files written" if "verified" in r.stdout else "   WRITE NOT VERIFIED")
-            img.write_bytes(b"\0" * img.stat().st_size)
+                write_files(img, prof, name, ssid, wifi_pw, web_pw, mcopy, mtype)
+                Path(whole.name).write_bytes(full_image(prof, uf2_bin, cp_bin, img))
+                print("   writing TinyUF2, CircuitPython, boot selector and files (one session, about a minute)")
+                r = rom_session(esp, b, cp_ports, "write-flash", "0x0", whole.name)
+            print("   done, verified" if "verified" in r.stdout else "   WRITE NOT VERIFIED")
+            for f in (img, Path(whole.name)):
+                f.write_bytes(b"\0" * f.stat().st_size)
     inventory.set_password(web_pw)
     print("Done. Press Reset on each board; once they're on Wi-Fi, run `cpfleet scan` (or `cpfleet add <ip>`).")
 
 
 def firmware(a):
-    """Update CircuitPython on USB boards and keep their files: write the new .bin, then the boot selector."""
+    """Update CircuitPython on USB boards and keep their files: CircuitPython's .bin with the boot selector
+    patched in, written in one session (the .bin covers otadata with 0xFF otherwise)."""
     prof = load_profile(a.profile)
     esp = Esp(prof["chip"])
     found = find_boards(esp, prof, False, a.only)
@@ -354,12 +394,13 @@ def firmware(a):
     print("Install CircuitPython %s on: %s" % (cp_ver, ", ".join(b["mac"] for b in found)))
     if a.dry_run or (not a.yes and input("Go ahead? [y/N] ").strip().lower() != "y"):
         return
-    ota = CACHE / "otadata-ota0.bin"
-    ota.write_bytes(otadata(prof["otadata_size"]))
+    data = bytearray(cp_bin.read_bytes())
+    ota = otadata(prof["otadata_size"])
+    data[prof["otadata_offset"]:prof["otadata_offset"] + len(ota)] = ota
+    patched = CACHE / (cp_bin.stem + "-otadata.bin")
+    patched.write_bytes(bytes(data))
     cp_ports = {b["port"] for b in found if not b["in_rom"]}
     for b in found:
-        port = into_rom(esp, b, cp_ports)
-        esp(port, "write-flash", "0x0", str(cp_bin))
-        esp(port, "write-flash", hex(prof["otadata_offset"]), str(ota))
+        rom_session(esp, b, cp_ports, "write-flash", "0x0", str(patched))
         print("%s: CircuitPython %s written" % (b["mac"], cp_ver))
     print("Press Reset on each board.")

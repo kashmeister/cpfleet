@@ -61,6 +61,19 @@ class Firmware(unittest.TestCase):
         self.assertEqual(data[28:32], bytes.fromhex("9a984347"))  # value ESP-IDF writes for sequence 1
         self.assertEqual(set(data[32:]), {0xFF})
 
+    def test_full_image_layout(self):
+        prof = provision.load_profile("magtag_2.9_grayscale")
+        d = Path(tempfile.mkdtemp())
+        (d / "uf2.bin").write_bytes(b"U" * 0x300000)            # TinyUF2 combined: up to past 0x2d0000
+        (d / "cp.bin").write_bytes(b"C" * 0x1000 + b"\xff" * 0xF000 + b"A" * 0x100)  # otadata area blank
+        (d / "fs.img").write_bytes(provision.fat12_image(prof["ffat_size"]))
+        img = provision.full_image(prof, d / "uf2.bin", d / "cp.bin", d / "fs.img")
+        self.assertEqual(len(img), prof["flash_size"])
+        self.assertEqual(img[:1], b"C")                            # CircuitPython over TinyUF2
+        self.assertEqual(img[0xe000 + 28:0xe000 + 32], bytes.fromhex("9a984347"))  # boot selector -> ota_0
+        self.assertEqual(img[0x2d0000:0x2d0001], b"U")             # TinyUF2's uf2 partition kept
+        self.assertEqual(img[0x310000 + 510:0x310000 + 512], b"\x55\xaa")  # CIRCUITPY file system
+
     def test_fat12_matches_circuitpython_geometry(self):
         img = provision.fat12_image(0xF0000)
         self.assertEqual(len(img), 0xF0000)
