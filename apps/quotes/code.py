@@ -68,8 +68,15 @@ def show(quote):
     palette[0], palette[1] = 0xFFFFFF, 0x000000
     grid = displayio.TileGrid(FONT.bitmap, pixel_shader=palette, width=cols, height=rows,
                               tile_width=CW, tile_height=CH, default_tile=BLANK)
-    term = terminalio.Terminal(grid, FONT)
-    term.write("\r\n" * ((rows - len(lines)) // 2) + "\r\n".join(lines))
+    # Place the characters ourselves, vertically centred. terminalio.Terminal writes from a cursor at the
+    # bottom row and scrolls up, which doesn't reliably put text where you mean it.
+    top = max(0, (rows - len(lines)) // 2)
+    for r, line in enumerate(lines[:rows - top]):
+        for c, ch in enumerate(line[:cols]):
+            if ch != " ":
+                glyph = FONT.get_glyph(ord(ch))
+                if glyph is not None:
+                    grid[c, top + r] = glyph.tile_index
     group = displayio.Group(scale=scale,
                             x=(display.width - cols * CW * scale) // 2,
                             y=(display.height - rows * CH * scale) // 2)

@@ -191,7 +191,14 @@ def draw(lines, scale):
             checks.append((c, r))
             c = line.find(views.CHECK, c + 1)
         text.append(line.replace(views.CHECK, " "))
-    terminalio.Terminal(grid, FONT).write("\r\n".join(text))
+    # Place each character in the grid ourselves, from the top-left. terminalio.Terminal writes from its
+    # cursor at the bottom row and scrolls up, so a short list ended up at the bottom of the screen.
+    for r, line in enumerate(text):
+        for c, ch in enumerate(line):
+            if ch != " ":
+                glyph = FONT.get_glyph(ord(ch))
+                if glyph is not None:
+                    grid[c, r] = glyph.tile_index
     group = displayio.Group(scale=scale)
     group.append(grid)
     for c, r in checks:
