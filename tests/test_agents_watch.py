@@ -49,6 +49,17 @@ class ConversationState(unittest.TestCase):
         self.assertEqual(s([PROMPT, assistant(tool_use("p", "ExitPlanMode"))]), ("question", "plan approval"))
         self.assertEqual(s([assistant(TEXT, stop="end_turn"), PROMPT]), ("other", ""))  # a new prompt: working
 
+    def test_turn_started(self):
+        def at(e, ts):
+            return dict(e, timestamp="2026-01-02T03:%02d:00.000Z" % ts)
+        t = aw.turn_started
+        base = aw.iso_time("2026-01-02T03:00:00Z")
+        entries = [at(PROMPT, 1), at(assistant(TEXT, stop="end_turn"), 2), at(PROMPT, 5),
+                   at(assistant(tool_use("t1", "Bash")), 6), at(tool_result("t1"), 7)]
+        self.assertEqual(t(entries), base + 5 * 60)  # the last prompt; a tool result isn't one
+        self.assertEqual(t(entries[3:]), base + 6 * 60)  # the prompt is further back: the earliest entry
+        self.assertIsNone(t([PROMPT]))
+
 
 class Snapshot(unittest.TestCase):
     def setUp(self):

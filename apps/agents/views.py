@@ -1,7 +1,9 @@
 # The agents screens of apps/agents: one view per tool (Claude Code, Codex, opencode), from a snapshot of
-# extras/agents_watch.py. A row is a state symbol, the title and, while it waits for you, how long:
-#   ! Fix the parser                             9m
-#     + Explore: find tests                      2m    a running subagent, and for how long
+# extras/agents_watch.py. A row is a state symbol, the title and how long it has been in that state:
+#   > Port the board app          run 12m   working (or busy) for 12 minutes, since your prompt
+#   ? Release notes                ask 3m   asking you something for 3 minutes
+#   ! Fix the parser              idle 9m   finished its turn 9 minutes ago (idle: likewise)
+#     + Explore: find tests            2m   a running subagent, and for how long
 #     v write the summary                              one that finished in the last few minutes (drawn as a
 #                                                      check mark: CHECK in the text marks where)
 # Plain Python, so the host's unit tests can import it too. CircuitPython's str has no ljust/rjust/center:
@@ -80,6 +82,32 @@ def age(seconds):
     return "%dh" % (m // 60)
 
 
+def timing(s, gen):
+    """The right-hand column of a session's row: how long it has worked on this turn (from the prompt; a
+    watcher from before "turn" doesn't say), has been asking you, or has done nothing (its turn over)."""
+    state = s.get("state")
+    if state in ("working", "busy"):
+        return "run " + age(gen - s["turn"]) if s.get("turn") else ""
+    since = s.get("since", gen)
+    return ("ask " if state == "question" else "idle ") + age(gen - since)
+
+
+def header(tool, waiting, offline, clock, width):
+    """The view's first line, left part: the longest wording that fits in width."""
+    name, short = LONG.get(tool, tool).upper(), SHORT.get(tool, tool).upper()
+    if offline:
+        options = ["WATCHER OFFLINE since " + clock, "OFFLINE since " + clock, "OFFLINE"]
+    elif waiting:
+        options = ["%s  %d waiting" % (name, waiting), "%s  %d waiting" % (short, waiting),
+                   "%s %d wait" % (short, waiting)]
+    else:
+        options = [name, short]
+    for h in options:
+        if len(h) <= width:
+            return h
+    return options[-1]
+
+
 def row(mark, text, right, cols):
     """mark + text, with `right` (an age, or "") flush right, in cols - 1 characters."""
     width = cols - 1 - len(mark)
@@ -98,27 +126,21 @@ def sub_text(sub):
 
 
 def agent_lines(d, tool, cols, rows, offline, source):
-    """The text of one tool's view, at most `rows` lines of at most cols - 1 characters (Terminal wraps a
-    full-width line by itself)."""
+    """The text of one tool's view, at most `rows` lines of at most cols - 1 characters (the last column
+    stays blank, as a margin)."""
     sessions = [s for s in d.get("sessions", []) if tool_of(s) == tool]
     gen = d.get("generated", 0)
-    waiting = waiting_by_tool(d)
-    head = LONG.get(tool, tool).upper()
-    if waiting.get(tool):
-        head += "  %d waiting" % waiting[tool]
-    if offline:
-        head = "WATCHER OFFLINE since " + d.get("clock", "?")
+    head = header(tool, waiting_by_tool(d).get(tool), offline, d.get("clock", "?"), cols - 12)
     tail = (source + " " if source else "") + d.get("clock", "")
     lines = [pad(head, cols - 12) + rjust(tail, 11)]  # the tool's name heads the view; no tab line
     if not sessions:
         lines.append("no recent %s sessions" % LONG.get(tool, tool))
-        lines.append("(the watcher's --hours sets how far back)")
+        lines.append("(watcher --hours: how far back)")
     for s in sessions:
         state = s.get("state")
         if state not in SYMBOL:
             continue
-        right = age(gen - s.get("since", gen)) if state in WAITING else ""
-        lines.append(row(SYMBOL[state] + " ", s.get("title", ""), right, cols))
+        lines.append(row(SYMBOL[state] + " ", s.get("title", ""), timing(s, gen), cols))
         subs = s.get("subagents") or []
         for sub in subs[:SUBS]:
             done = sub.get("done")

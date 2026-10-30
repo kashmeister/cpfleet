@@ -4,6 +4,8 @@
 #   A: next view: Claude, Codex, opencode (when they have sessions), a quote
 #   B: acknowledge (LEDs off until something new waits)      C: another quote (in quote view)
 # The screen redraws at most every AGENTS_REDRAW seconds (default 30) for new data; buttons redraw at once.
+# Text is terminalio's font at one and a half times its size (32 x 7 characters); AGENTS_FONT = "small"
+# keeps it as it is (49 x 10).
 # Where the data comes from, first match wins:
 #   USB: lines on usb_cdc.data from agents_watch.py --usb (needs CPFLEET_USB_DATA = 1 and a reset; boot.py)
 #   Wi-Fi: AGENTS_URL if set, else the watcher found by name over mDNS (_cpagents._tcp); a failing
@@ -48,11 +50,11 @@ QUOTE_EVERY = 15 * 60
 # Minimum seconds between e-ink redraws for new data, to spare the panel; the LEDs still react at once.
 # Button presses redraw straight away. Override per board: cpfleet settings <b> set AGENTS_REDRAW 60
 REDRAW = int(os.getenv("AGENTS_REDRAW") or 30)
+SMALL_TEXT = os.getenv("AGENTS_FONT") == "small"
 
 display = board.DISPLAY
 FONT = terminalio.FONT
 CW, CH = FONT.get_bounding_box()[:2]
-BLANK = FONT.get_glyph(ord(" ")).tile_index
 wifi.radio.power_management = wifi.PowerManagement.NONE  # answer quickly instead of sleeping between beacons
 pool = socketpool.SocketPool(wifi.radio)
 
@@ -165,24 +167,65 @@ CHECK_SHAPE = ("    #",
 CHECK_TOP = 2
 
 
-def check_bitmap():
-    bmp = displayio.Bitmap(CW, CH, 2)
-    for y, line in enumerate(CHECK_SHAPE):
-        for x, c in enumerate(line):
-            if c == "#" and x < CW and CHECK_TOP + y < CH:
-                bmp[x, CHECK_TOP + y] = 1
-    return bmp
+def check_pixel(x, y):
+    y -= CHECK_TOP
+    return 0 <= y < len(CHECK_SHAPE) and x < len(CHECK_SHAPE[y]) and CHECK_SHAPE[y][x] == "#"
 
 
-CHECK = check_bitmap()
+class Font:
+    """terminalio's font, or a copy of its printable characters num/den times the size (each pixel taken
+    from the nearest one of the original), as a tile sheet; with a check mark of the same size."""
+
+    def __init__(self, num=1, den=1):
+        self.cw, self.ch = CW * num // den, CH * num // den
+        xs = [x * den // num for x in range(self.cw)]  # the original column and row of each new one
+        ys = [y * den // num for y in range(self.ch)]
+        self.check = displayio.Bitmap(self.cw, self.ch, 2)
+        for y in range(self.ch):
+            for x in range(self.cw):
+                if check_pixel(xs[x], ys[y]):
+                    self.check[x, y] = 1
+        if num == den:
+            self.bitmap, self.tiles = FONT.bitmap, None
+            self.blank = FONT.get_glyph(ord(" ")).tile_index
+            return
+        src, per_row = FONT.bitmap, FONT.bitmap.width // CW
+        self.bitmap = displayio.Bitmap(self.cw * 95, self.ch, 2)
+        self.tiles = {}
+        for i in range(95):  # " " to "~"
+            glyph = FONT.get_glyph(32 + i)
+            if glyph is None:
+                continue
+            ox, oy = glyph.tile_index % per_row * CW, glyph.tile_index // per_row * CH
+            for y in range(self.ch):
+                sy = oy + ys[y]
+                for x in range(self.cw):
+                    if src[ox + xs[x], sy]:
+                        self.bitmap[i * self.cw + x, y] = 1
+            self.tiles[32 + i] = i
+        self.blank = self.tiles[32]
+
+    def tile(self, ch):
+        if self.tiles is not None:
+            return self.tiles.get(ord(ch))
+        glyph = FONT.get_glyph(ord(ch))
+        return glyph.tile_index if glyph is not None else None
+
+    def size(self, scale=1):
+        """(columns, rows) on the display"""
+        return display.width // (self.cw * scale), display.height // (self.ch * scale)
 
 
-def draw(lines, scale):
-    cols, rows = display.width // (CW * scale), display.height // (CH * scale)
+SMALL = Font()
+TEXT = SMALL if SMALL_TEXT else Font(3, 2)  # the agents views
+
+
+def draw(lines, font, scale):
+    cols, rows = font.size(scale)
     palette = displayio.Palette(2)
     palette[0], palette[1] = 0xFFFFFF, 0x000000
-    grid = displayio.TileGrid(FONT.bitmap, pixel_shader=palette, width=cols, height=rows,
-                              tile_width=CW, tile_height=CH, default_tile=BLANK)
+    grid = displayio.TileGrid(font.bitmap, pixel_shader=palette, width=cols, height=rows,
+                              tile_width=font.cw, tile_height=font.ch, default_tile=font.blank)
     text, checks = [], []
     for r, line in enumerate(lines[:rows]):
         line = line[:cols - 1]
@@ -196,13 +239,13 @@ def draw(lines, scale):
     for r, line in enumerate(text):
         for c, ch in enumerate(line):
             if ch != " ":
-                glyph = FONT.get_glyph(ord(ch))
-                if glyph is not None:
-                    grid[c, r] = glyph.tile_index
+                t = font.tile(ch)
+                if t is not None:
+                    grid[c, r] = t
     group = displayio.Group(scale=scale)
     group.append(grid)
     for c, r in checks:
-        group.append(displayio.TileGrid(CHECK, pixel_shader=palette, x=c * CW, y=r * CH))
+        group.append(displayio.TileGrid(font.check, pixel_shader=palette, x=c * font.cw, y=r * font.ch))
     display.root_group = group
     display.refresh()
 
@@ -228,7 +271,7 @@ quotes = load_quotes()
 quote = random.choice(quotes)
 quote_at = time.monotonic()
 view, data, shown, acked = "claude", {}, None, set()
-data_n, built, lines, scale = 0, None, [], 1  # data_n counts snapshots, so lines are rebuilt only for new ones
+data_n, built, lines, font, scale = 0, None, [], SMALL, 1  # data_n counts snapshots: lines are rebuilt only for new ones
 last_draw, force = -REDRAW, True
 last_fetch, last_ok = -POLL, time.monotonic()
 url, fails, last_lookup = URL, 0, -LOOKUP_EVERY
@@ -307,23 +350,24 @@ while True:
     if key == built:
         pass
     elif not known:
-        lines, scale = ["Looking for the agents watcher...", "",
-                        "Start extras/agents_watch.py on the Mac", "(Wi-Fi, found by name), or with --usb",
-                        "and plug this board into it. Or set",
-                        "AGENTS_URL http://<mac-ip>:8766/agents.json"], 1
+        lines, font, scale = ["Looking for the agents watcher...", "",
+                              "Start extras/agents_watch.py on the Mac", "(Wi-Fi, found by name), or with --usb",
+                              "and plug this board into it. Or set",
+                              "AGENTS_URL http://<mac-ip>:8766/agents.json"], SMALL, 1
     elif view != "quote":
-        cols, rows = display.width // CW, display.height // CH
-        lines, scale = views.agent_lines(data, view, cols, rows, offline, source), 1
+        cols, rows = TEXT.size()
+        lines, font, scale = views.agent_lines(data, view, cols, rows, offline, source), TEXT, 1
     else:
-        cols, rows = display.width // (CW * 2), display.height // (CH * 2)
-        lines, scale = quote_lines(quote, cols, rows), 2
+        cols, rows = SMALL.size(2)
+        lines, font, scale = quote_lines(quote, cols, rows), SMALL, 2
     built = key
-    if (lines, scale) != shown and display.time_to_refresh == 0 and not display.busy:
+    screen = (lines, font, scale)
+    if screen != shown and display.time_to_refresh == 0 and not display.busy:
         try:
-            draw(lines, scale)
-            shown, last_draw, force = (lines, scale), now, False
+            draw(lines, font, scale)
+            shown, last_draw, force = screen, now, False
         except RuntimeError:  # refreshed too soon; try again next time round
             pass
-    elif force and (lines, scale) == shown:
+    elif force and screen == shown:
         force = False
     time.sleep(0.05)

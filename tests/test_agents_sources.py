@@ -167,9 +167,11 @@ class CodexSource(CodexFixture, unittest.TestCase):
     def test_turn_parsing(self):
         entries = [{"timestamp": isotime(a), "type": k, "payload": p} for a, k, p in
                    [started(30), call(20, "a"), call(20, "b", "js"), output(10, "a")]]
-        turn, calls, last, error = aw.codex_turn(entries)
+        turn, calls, last, error, start = aw.codex_turn(entries)
         self.assertEqual((turn, calls), ("started", {"b": "js"}))
         self.assertAlmostEqual(last, time.time() - 10, delta=2)
+        self.assertAlmostEqual(start, time.time() - 30, delta=2)  # task_started
+        self.assertAlmostEqual(aw.codex_turn(entries[1:])[4], time.time() - 20, delta=2)  # none: the earliest
         entries.append({"timestamp": isotime(5), "type": "event_msg",
                         "payload": {"type": "task_complete", "error": "boom"}})
         self.assertEqual(aw.codex_turn(entries)[:2], ("task_complete", {}))
@@ -288,6 +290,9 @@ class OpencodeSource(OpencodeFixture, unittest.TestCase):
             "New prompt": "working",
         })
         self.assertEqual(got["Run the build"]["detail"], "bash")
+        self.assertAlmostEqual(got["New prompt"]["turn"], time.time() - 10, delta=3)  # the prompt's creation
+        self.assertIn("turn", aw.compact(got["New prompt"], "opencode"))  # working: the boards get it
+        self.assertNotIn("turn", aw.compact(got["Plan the release"], "opencode"))
         sub = got["Refactor the parser"]["subagents"][0]
         self.assertEqual((sub["type"], sub["desc"], sub["done"]), ("explore", "find tests", False))
         self.assertAlmostEqual(sub["since"], time.time() - 605, delta=3)  # the child session's creation
@@ -457,17 +462,44 @@ class BoardViews(unittest.TestCase):
                 {"type": "general-purpose", "desc": "Find Project Bundle", "since": 10000 - 20},
                 {"type": "codex:codex-rescue", "desc": "second opinion", "since": 9000, "done": 1},
                 {"type": "claude-code-guide", "desc": "hooks docs", "since": 9000}]},
-            {"id": "b", "title": "t" * 80, "state": "working", "since": 9990}]}
+            {"id": "b", "title": "t" * 80, "state": "working", "since": 9990}]}  # an old watcher: no "turn"
         lines = views.agent_lines(d, "claude", COLS, ROWS, False, "")
         self.check_fits(lines)
         self.assertEqual(lines[1:], [
-            "! Fix the parser" + " " * 30 + "9m",
+            "! Fix the parser" + " " * 25 + "idle 9m",
             "  + Explore: find tests" + " " * 23 + "2m",
             "  + Find Project Bundle" + " " * 22 + "<1m",
             "  " + views.CHECK + " codex-rescue: second opinion" + " " * 16,  # drawn as a check mark
             "    +1 more",
             "> " + "t" * 46])
         self.assertEqual({len(l) for l in lines[2:4]}, {COLS - 1})
+
+    def test_timings(self):
+        gen = 10000
+        t = views.timing
+        self.assertEqual(t({"state": "working", "since": gen - 5, "turn": gen - 750}, gen), "run 10m")
+        self.assertEqual(t({"state": "busy", "since": gen - 30, "turn": gen - 200}, gen), "run 3m")
+        self.assertEqual(t({"state": "working", "since": gen}, gen), "")  # an old watcher sends no turn
+        self.assertEqual(t({"state": "question", "since": gen - 200}, gen), "ask 3m")
+        self.assertEqual(t({"state": "your-turn", "since": gen - 30}, gen), "idle <1m")
+        self.assertEqual(t({"state": "idle", "since": gen - 7300}, gen), "idle 2h")
+
+    def test_larger_text_fits(self):
+        cols, rows = 296 // 9, 128 // 18  # terminalio's font at 1.5 times
+        d = dict(NEW, sessions=[dict(s, turn=900) for s in NEW["sessions"]] * 3)
+        for tool in ("claude", "codex", "opencode"):
+            for offline in (False, True):
+                lines = views.agent_lines(d, tool, cols, rows, offline, "WiFi")
+                self.assertLessEqual(len(lines), rows)
+                for line in lines:
+                    self.assertLess(len(line), cols, line)
+        codex = views.agent_lines(d, "codex", cols, rows, False, "WiFi")
+        self.assertEqual(codex[0], "CODEX  2 waiting     WiFi 12:00")  # the watcher's count
+        claude = views.agent_lines(d, "claude", cols, rows, False, "WiFi")
+        self.assertEqual(claude[0].split()[:1], ["CLAUDE"])
+        self.assertTrue(claude[1].startswith("> Claude one") and claude[1].endswith("run 1m"))
+        self.assertTrue(views.agent_lines(d, "claude", cols, rows, True, "WiFi")[0].startswith("OFFLINE since"))
+        self.assertEqual(views.header("claude", 2, False, "12:00", 19), "CLAUDE  2 waiting")
 
     def test_no_string_methods_circuitpython_lacks(self):
         for name in ("views.py", "code.py"):

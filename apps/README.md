@@ -17,15 +17,16 @@ Each folder is pushed to boards as is: `cpfleet push apps/<name> --to <boards>`.
 
 A tool that isn't installed, or has nothing in the last `--hours` (3), is left out; a database that is locked or unreadable is skipped for that scan, and the others carry on. `--sources claude,codex` reads only those. The databases are opened read-only (`mode=ro`); nothing of any tool's settings is touched.
 
-It serves a compact `/agents.json` on your network and advertises it over Bonjour as `_cpagents._tcp` (with macOS's own `dns-sd`). No hooks or settings changes are involved. The MagTags find it by name, fetch it every 3 seconds and light their LEDs at once. To spare the e-ink panel, they redraw at most every 30 seconds for new data (`cpfleet settings <b> set AGENTS_REDRAW 60` to change that per board); button presses redraw straight away. The top line names the view's tool and how many of its sessions wait, with where the data comes from (`WiFi` or `USB`) and the watcher's clock on the right; the sessions follow straight after. The LEDs pulse for a waiting session in any tool, so press A to find which view it's in:
+It serves a compact `/agents.json` on your network and advertises it over Bonjour as `_cpagents._tcp` (with macOS's own `dns-sd`). No hooks or settings changes are involved. The MagTags find it by name, fetch it every 3 seconds and light their LEDs at once. To spare the e-ink panel, they redraw at most every 30 seconds for new data (`cpfleet settings <b> set AGENTS_REDRAW 60` to change that per board); button presses redraw straight away. The top line names the view's tool and how many of its sessions wait, with where the data comes from (`WiFi` or `USB`) and the watcher's clock on the right; the sessions follow straight after, each with how long it has been in its state. The text is terminalio's font at one and a half times its size, 32 characters by 7 lines (`cpfleet settings <b> set AGENTS_FONT small` for the original size, 49 by 10). The LEDs pulse for a waiting session in any tool, so press A to find which view it's in:
 
 ```
-CLAUDE CODE  2 waiting                WiFi 14:05
-! Fix the parser                              9m
-  + Explore: find tests                       2m
+CLAUDE  2 waiting    WiFi 14:05
+! Fix the parser        idle 9m
+  + Explore: find tests      2m
   ✓ write the summary
-> Port the board app
-. Release notes
+> Port the board app    run 12m
+? Pick a name            ask 3m
+. Release notes         idle 2h
 ```
 
 Button A goes Claude, Codex, opencode, quote; a tool's view is skipped while it has no sessions. A watcher from before Codex and opencode support sends no `tool`, and its sessions show as Claude's.
@@ -60,9 +61,13 @@ python3 extras/agents_watch.py --usb                   # HTTP and USB; --no-http
 | `AGENTS_URL` | found by name | The watcher's address, if mDNS can't find it |
 | `AGENTS_TOKEN` | none | Sent as `Authorization: Bearer …`; needed when the watcher runs with `AGENTS_TOKEN` set |
 | `AGENTS_REDRAW` | 30 | Minimum seconds between e-ink redraws for new data |
+| `AGENTS_FONT` | larger | `small`: terminalio's font at its own size, for more rows |
 | `CPFLEET_USB_DATA` | off | `1`: turn on the USB data channel at boot (`boot.py`; needs a reset) |
 
-Each row starts with a symbol for its state; a waiting row ends with how long it has waited (`<1m`, `9m`, `2h`).
+Each row starts with a symbol for its state and ends with how long (`<1m`, `9m`, then 10-minute steps, then hours, so the screen doesn't redraw every minute):
+- **`run 12m`:** working (or busy) on the current turn for 12 minutes, counted from your prompt. A watcher from before this sends no start time, and the row shows none.
+- **`ask 3m`:** asking you something for 3 minutes.
+- **`idle 9m`:** nothing for 9 minutes since the turn ended (`!`), or since the session last did anything (`.`).
 
 | Symbol | State | Meaning |
 |---|---|---|

@@ -18,7 +18,8 @@ Set AGENTS_TOKEN in the environment to require it from HTTP clients (Authorizati
 
 States: "question" (Claude's AskUserQuestion or plan approval, opencode's question tool), "your-turn" (the
 session finished its turn), "working", "busy" (a tool call has had no result for a while: a long command,
-or a permission prompt; none of the logs can tell those apart), "idle".
+or a permission prompt; none of the logs can tell those apart), "idle". Each session's "since" is its last
+activity; a working or busy one also has "turn", when its current turn started.
 """
 import argparse
 import calendar
@@ -160,6 +161,23 @@ def conversation_state(entries):
     return "other", ""
 
 
+def turn_started(entries):
+    """When the current turn began: the last prompt (a user entry that isn't only tool results), or, with
+    no prompt in the tail, its earliest entry (the turn began before that). None without timestamps."""
+    start, first = None, None
+    for e in entries:
+        ts = iso_time(e.get("timestamp"))
+        first = first or ts
+        if e.get("type") != "user" or e.get("isMeta"):
+            continue
+        content = (e.get("message") or {}).get("content")
+        if isinstance(content, list) and any(isinstance(c, dict) and c.get("type") == "tool_result"
+                                             for c in content):
+            continue
+        start = ts or start
+    return start or first
+
+
 def title_of(session_dir, entries, project_dir):
     try:
         t = json.loads((session_dir / "custom-title.json").read_text()).get("customTitle")
@@ -227,7 +245,8 @@ def claude_sessions(hours, now):
         else:
             state = "working" if age < WORKING_SECS else "idle"
         s = {"id": p.stem, "title": title_of(session_dir, entries, p.parent), "state": state,
-             "detail": detail, "since": int(mtime), "subagents": subagents(session_dir, now)}
+             "detail": detail, "since": int(mtime), "turn": turn_started(entries),
+             "subagents": subagents(session_dir, now)}
         busy_with_subagents(s)
         sessions.append(s)
     return sessions
@@ -248,9 +267,10 @@ _codex_meta, _codex_tail, _codex_index = {}, {}, [None, {}]
 
 
 def codex_turn(entries):
-    """(turn, open tool calls {call_id: name}, last activity, error) from a rollout's entries. turn is
-    "started", "task_complete", "turn_aborted" or None if the entries hold no turn event."""
-    turn, calls, last, error = None, {}, None, False
+    """(turn, open tool calls {call_id: name}, last activity, error, start) from a rollout's entries. turn
+    is "started", "task_complete", "turn_aborted" or None if the entries hold no turn event; start is when
+    the last turn started, or the earliest entry if none started in these entries."""
+    turn, calls, last, error, start, first = None, {}, None, False, None, None
     for e in entries:
         p = e.get("payload")
         if not isinstance(p, dict) or p.get("type") in CODEX_IGNORED:
@@ -258,10 +278,11 @@ def codex_turn(entries):
         ts = iso_time(e.get("timestamp"))
         if ts:
             last = ts
+            first = first or ts
         kind, t = e.get("type"), p.get("type")
         if kind == "event_msg":
             if t == "task_started":
-                turn, error = "started", False
+                turn, error, start = "started", False, ts
                 calls.clear()
             elif t in ("task_complete", "turn_aborted"):
                 turn, error = t, bool(p.get("error"))
@@ -271,7 +292,7 @@ def codex_turn(entries):
                 calls[p.get("call_id")] = p.get("name") or "tool"
             elif t in ("function_call_output", "custom_tool_call_output"):
                 calls.pop(p.get("call_id"), None)
-    return turn, calls, last, error
+    return turn, calls, last, error, start or first
 
 
 def codex_meta(path):
@@ -349,17 +370,17 @@ def codex_sessions(hours, now):
             continue
         if st.st_mtime < cutoff:
             continue
-        turn, calls, last, error = codex_tail(path, st.st_size, st.st_mtime)
+        turn, calls, last, error, start = codex_tail(path, st.st_size, st.st_mtime)
         if not last or last < cutoff:  # only touched by the app's settings, not active
             continue
         meta = codex_meta(path)
         tid = meta.get("id") or (UUID.findall(Path(path).stem) or [Path(path).stem])[0]
-        found.append((tid, meta, turn, calls, last, error))
+        found.append((tid, meta, turn, calls, last, error, start))
     ids = [f[0] for f in found]
     threads, edges = codex_threads(ids)
     names = codex_titles()
     top, children = {}, []
-    for tid, meta, turn, calls, last, error in found:
+    for tid, meta, turn, calls, last, error, started in found:
         if threads.get(tid, (0,))[0]:
             continue  # archived in the app
         age = now - last
@@ -379,7 +400,8 @@ def codex_sessions(hours, now):
                                      meta.get("thread_source") in CODEX_UNATTENDED_THREADS):
             state = "idle"
         title = names.get(tid) or (threads.get(tid) or (0, None))[1] or Path(meta.get("cwd") or "codex").name
-        s = {"id": tid, "title": title, "state": state, "detail": detail, "since": int(last), "subagents": []}
+        s = {"id": tid, "title": title, "state": state, "detail": detail, "since": int(last), "turn": started,
+             "subagents": []}
         sub = source.get("subagent") if isinstance(source, dict) else None
         if sub is not None or tid in edges:
             spawn = sub.get("thread_spawn") if isinstance(sub, dict) else None
@@ -413,7 +435,8 @@ SUBAGENT_SUFFIX = re.compile(r"\s*\(@([\w.-]+) subagent\)\s*$")
 
 
 def opencode_read(db, cutoff_ms):
-    """[(session row, last message data or None, its open tool calls [tool name], activity ms)]"""
+    """[(session row, last message data or None, its open tool calls [tool name], activity ms,
+    the last prompt's time ms or None)]"""
     rows = db.execute("SELECT id, parent_id, title, directory, time_updated, time_created FROM session "
                       "WHERE time_archived IS NULL AND time_updated >= ?", (cutoff_ms,)).fetchall()
     out = []
@@ -441,7 +464,10 @@ def opencode_read(db, cutoff_ms):
                     st = part.get("state") or {}
                     if part.get("type") == "tool" and st.get("status") in ("pending", "running"):
                         tools.append(part.get("tool") or "tool")
-        out.append((row, msg, tools, activity))
+        prompt = db.execute("SELECT MAX(time_created) FROM message WHERE session_id = ? AND "
+                            "(data LIKE '%\"role\":\"user\"%' OR data LIKE '%\"role\": \"user\"%')",
+                            (row[0],)).fetchone()[0]
+        out.append((row, msg, tools, activity, prompt))
     return out
 
 
@@ -473,7 +499,7 @@ def opencode_sessions(hours, now):
         return []
     rows = ro_query(OPENCODE_DB, lambda db: opencode_read(db, int((now - hours * 3600) * 1000)))
     top, children = {}, []
-    for row, msg, tools, activity in rows:
+    for row, msg, tools, activity, prompt in rows:
         sid, parent, title, directory = row[:4]
         age = now - activity / 1000.0
         state, detail = opencode_state(msg, tools, age)
@@ -487,7 +513,8 @@ def opencode_sessions(hours, now):
                 children.append((parent, state, detail, sub))
             continue
         top[sid] = {"id": sid, "title": title or Path(directory or "opencode").name, "state": state,
-                    "detail": detail, "since": int(activity / 1000), "subagents": []}
+                    "detail": detail, "since": int(activity / 1000),
+                    "turn": prompt / 1000.0 if prompt else None, "subagents": []}
     for parent, state, detail, sub in children:
         s = top.get(parent)
         if not s:
@@ -516,6 +543,8 @@ def compact(s, tool):
            "since": s["since"]}
     if s.get("detail"):
         out["detail"] = clip(s["detail"], 20)
+    if s["state"] in ("working", "busy") and s.get("turn"):
+        out["turn"] = int(s["turn"])  # how long it has been at it
     subs = sorted(s.get("subagents") or [], key=lambda x: (bool(x.get("done")), -x.get("since", 0)))
     if subs:
         out["subagents"] = [compact_sub(x) for x in subs[:SUBS]]  # running first, newest first
