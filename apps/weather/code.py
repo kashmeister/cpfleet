@@ -7,7 +7,7 @@
 #   WEATHER_UNITS              "metric" for °C and km/h; otherwise °F and mph
 #   WEATHER_EVERY              minutes between fetches
 #   CPFLEET_GLOW               the 4 LEDs glow a dim red, easy on the eyes at night, 0-255
-#                              (default 12; 0 is off), as in apps/agents and apps/quotes
+#                              (default 25; 0 is off), as in apps/agents and apps/quotes
 # Icons: bmps/weather_icons_48px.bmp and _20px.bmp, from Adafruit's MagTag weather sheets (Meteocons), which
 # extras/weather_icons.py fetches next to this file; without them the screen does without.
 # Built-in modules only (no lib/); weather.py is the screen, screen.py draws it.
@@ -29,8 +29,8 @@ import weather
 EVERY = 60 * int(os.getenv("WEATHER_EVERY") or 15)
 RETRY = 60
 METRIC = (os.getenv("WEATHER_UNITS") or "").lower() == "metric"
-GLOW = int(os.getenv("CPFLEET_GLOW") or 12)  # 1 is the dimmest
-WARM = (1.0, 0.0, 0.0)  # dim red glow, easy on the eyes at night: (12, 0, 0) at the default brightness; red can run brighter, the eye is less sensitive to it
+GLOW = int(os.getenv("CPFLEET_GLOW") or 25)  # 1 is the dimmest
+WARM = (1.0, 0.0, 0.0)  # dim red glow, easy on the eyes at night: (25, 0, 0) at the default brightness; red can run brighter, the eye is less sensitive to it
 display = board.DISPLAY
 pool = socketpool.SocketPool(wifi.radio)
 context = ssl.create_default_context()
