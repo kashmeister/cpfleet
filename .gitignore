@@ -12,3 +12,5 @@ password
 *.bin
 # machine-specific notes for agents
 CLAUDE.local.md
+# third-party icons fetched by extras/weather_icons.py; not redistributed here
+apps/weather/bmps/

@@ -7,6 +7,7 @@ Each folder is pushed to boards as is: `cpfleet push apps/<name> --to <boards>`.
 | [quotes](quotes) | Adafruit MagTag | A random quote from `quotes.txt` every 15 minutes; button A shows another. Built-in modules only (no `lib/`). Edit `quotes.txt` (`text \| author` per line, plain ASCII) and push again. |
 
 | [agents](agents) | Adafruit MagTag | Your Claude Code, Codex and opencode sessions and their subagents, one view per tool, with the LEDs pulsing amber while one waits for you. Needs `extras/agents_watch.py` running on the Mac where they run. A: next view (Claude, Codex, opencode, a quote); B: acknowledge; C: another quote. |
+| [weather](weather) | Adafruit MagTag | Now, the next hours and three days from Open-Meteo (no key), with icons. Set `WEATHER_LAT` and `WEATHER_LON` (strings), reset; `WEATHER_UNITS metric` for °C. A: fetch now. The icons are Adafruit's MagTag weather sheets (Meteocons), not in this repo: `python3 extras/weather_icons.py` fetches them into `apps/weather/bmps` before you push. `weather.py` (what to show) and `screen.py` (drawing it, in four text sizes, with icons) are written to be shared by an app that cycles through screens. |
 
 ### Coding agents display (Claude Code, Codex, opencode)
 
