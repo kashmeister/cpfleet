@@ -6,8 +6,8 @@
 #   WEATHER_LAT, WEATHER_LON   where, as strings ("42.36", "-71.06"); two decimals are plenty
 #   WEATHER_UNITS              "metric" for °C and km/h; otherwise °F and mph
 #   WEATHER_EVERY              minutes between fetches
-#   CPFLEET_GLOW               the 4 LEDs glow faintly white so it can be read in the dark, 0-255 (default 1,
-#                              the dimmest; 0 is off), as in apps/agents and apps/quotes
+#   CPFLEET_GLOW               the 4 LEDs glow a dim, soft warm white so it can be read in the dark, 0-255
+#                              (default 5; 0 is off), as in apps/agents and apps/quotes
 # Icons: bmps/weather_icons_48px.bmp and _20px.bmp, from Adafruit's MagTag weather sheets (Meteocons), which
 # extras/weather_icons.py fetches next to this file; without them the screen does without.
 # Built-in modules only (no lib/); weather.py is the screen, screen.py draws it.
@@ -29,7 +29,8 @@ import weather
 EVERY = 60 * int(os.getenv("WEATHER_EVERY") or 15)
 RETRY = 60
 METRIC = (os.getenv("WEATHER_UNITS") or "").lower() == "metric"
-GLOW = int(os.getenv("CPFLEET_GLOW") or 1)  # 1 is the dimmest
+GLOW = int(os.getenv("CPFLEET_GLOW") or 5)  # 1 is the dimmest
+WARM = (1.0, 0.78, 0.5)  # soft warm white
 display = board.DISPLAY
 pool = socketpool.SocketPool(wifi.radio)
 context = ssl.create_default_context()
@@ -70,7 +71,8 @@ led_power = digitalio.DigitalInOut(board.NEOPIXEL_POWER)
 led_power.switch_to_output(value=GLOW == 0)  # low = LEDs powered on the MagTag
 led_pin = digitalio.DigitalInOut(board.NEOPIXEL)
 led_pin.direction = digitalio.Direction.OUTPUT
-neopixel_write.neopixel_write(led_pin, bytes([GLOW] * 12))
+r, g, b = (int(GLOW * f + 0.5) for f in WARM)
+neopixel_write.neopixel_write(led_pin, bytes([g, r, b] * 4))  # the LEDs take green, red, blue
 keys = keypad.Keys((board.BUTTON_A,), value_when_pressed=False, pull=True)
 if not (screen.sheet(weather.LARGE, "/bmps/weather_icons_48px.bmp", 48) and
         screen.sheet(weather.SMALL, "/bmps/weather_icons_20px.bmp", 20)):
