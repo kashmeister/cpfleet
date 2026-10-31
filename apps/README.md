@@ -6,7 +6,7 @@ Each folder is pushed to boards as is: `cpfleet push apps/<name> --to <boards>`.
 |---|---|---|
 | [quotes](quotes) | Adafruit MagTag | A random quote from `quotes.txt` every 15 minutes; button A shows another. The LEDs glow a dim red (`CPFLEET_GLOW`). Built-in modules only (no `lib/`). Edit `quotes.txt` (`text \| author` per line, plain ASCII) and push again. |
 
-| [agents](agents) | Adafruit MagTag | Your Claude Code, Codex and opencode sessions and their subagents as a grid of cards, one column under each LED and above each button; a card's LED pulses slowly from red to orange while it waits for you, and its button opens it. Needs `extras/agents_watch.py` running on the Mac where they run. |
+| [agents](agents) | Adafruit MagTag | Your Claude Code, Codex and opencode sessions and their subagents as a grid of cards, one column under each LED and above each button; a card's LED pulses slowly from red to a deep amber while it waits for you, and its button opens it. Needs `extras/agents_watch.py` running on the Mac where they run. |
 | [weather](weather) | Adafruit MagTag | Now, the next hours and three days from Open-Meteo (no key), with icons. Set `WEATHER_LAT` and `WEATHER_LON` (strings), reset; `WEATHER_UNITS metric` for °C. A: fetch now. The icons are Adafruit's MagTag weather sheets (Meteocons), not in this repo: `python3 extras/weather_icons.py` fetches them into `apps/weather/bmps` before you push. `weather.py` (what to show) and `screen.py` (drawing it, in four text sizes, with icons) are written to be shared by an app that cycles through screens. |
 
 ### Coding agents display (Claude Code, Codex, opencode)
@@ -44,7 +44,7 @@ Times are coarse (`<1m`, `9m`, then 10-minute steps, then hours) so the screen d
 
 **Order.** Sessions waiting for you come first (for up to an hour, until you look at them), then busy and working ones, then the rest, the most recently active first. A session keeps its column while it stays on screen, so its LED doesn't move. With no sessions at all, the board shows a quote; any button shows another.
 
-**Waiting for you.** The card gets a black bar along its top, and the LED above it pulses slowly, from the red glow to orange and back, about every 3.5 seconds.
+**Waiting for you.** The card gets a black bar along its top, and the LED above it pulses slowly, from the red glow to a deep amber (like a BMW instrument cluster) and back, about every 3.5 seconds.
 
 **Press the button under a card** for that session's page, a frozen frame of the moment you pressed: its state and for how long, the tool and the title, then what it's doing (`> Bash: Run the tests`), its subagents, and as much of the end of its latest reply as fits. That counts as having seen it: the bar and the LED go. The board goes back to the cards by itself after 20 seconds (`cpfleet settings <b> set AGENTS_PAGE 30`), or at any button.
 
@@ -91,7 +91,7 @@ At most 8 sessions per tool and 3 subagents per session are sent; the header cou
 
 **LEDs:**
 - **A dim red glow, always:** so the screen can be read in the dark without spoiling night vision (`CPFLEET_GLOW`, 25 by default: `cpfleet settings <b> set CPFLEET_GLOW 40` is brighter, `1` the dimmest, `0` off; the quotes app does the same).
-- **A slow pulse over a column, red to orange and back about every 3.5 seconds:** its session has been waiting for less than an hour and you haven't opened it.
+- **A slow pulse over a column, red to deep amber and back about every 3.5 seconds:** its session has been waiting for less than an hour and you haven't opened it.
 - **All off:** no reply from the watcher for 30 s.
 - If the LEDs are over the wrong columns on your board, `cpfleet settings <b> set AGENTS_LEDS 0123` gives their order, left to right (the MagTag's own is `3210`).
 
