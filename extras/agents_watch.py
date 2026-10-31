@@ -2,7 +2,9 @@
 """Serve a live summary of local coding-agent sessions (Claude Code, Codex, opencode) for e-ink displays.
 
 Reads, never writes, what each tool already keeps on disk:
-  claude    ~/.claude/projects/<project>/<session>.jsonl, its custom-title.json and subagents/*.meta.json
+  claude    ~/.claude/projects/<project>/<session>.jsonl, its custom-title.json and subagents/*.meta.json;
+            for sessions run in the Claude desktop app, its title and archived flag
+            (~/Library/Application Support/Claude/claude-code-sessions/*/*/local_*.json)
   codex     ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl, ~/.codex/session_index.jsonl (titles) and
             ~/.codex/state_5.sqlite (archived threads, sub-thread links), opened read-only
   opencode  ~/.local/share/opencode/opencode.db (sessions, messages, parts), opened read-only
@@ -18,8 +20,11 @@ Set AGENTS_TOKEN in the environment to require it from HTTP clients (Authorizati
 
 States: "question" (Claude's AskUserQuestion or plan approval, opencode's question tool), "your-turn" (the
 session finished its turn), "working", "busy" (a tool call has had no result for a while: a long command,
-or a permission prompt; none of the logs can tell those apart), "idle". Each session's "since" is its last
-activity; a working or busy one also has "turn", when its current turn started.
+or a permission prompt; none of the logs can tell those apart), "background" (its turn is over but it
+waits for its own background command or subagent, which will wake it), "idle". Each session's "since" is its last
+activity; a working or busy one also has "turn", when its current turn started. With --text, a session
+also has "said", the end of the agent's latest reply, and a working one "doing", its open tool call (what
+the agent wrote, never your prompts).
 """
 import argparse
 import calendar
@@ -45,18 +50,64 @@ PROJECTS = Path(os.environ.get("CLAUDE_PROJECTS") or HOME / ".claude" / "project
 CODEX_HOME = Path(os.environ.get("CODEX_HOME") or HOME / ".codex")
 XDG_DATA = Path(os.environ.get("XDG_DATA_HOME") or HOME / ".local" / "share")
 OPENCODE_DB = Path(os.environ.get("OPENCODE_DB") or XDG_DATA / "opencode" / "opencode.db")
+DESKTOP_SESSIONS = Path(os.environ.get("CLAUDE_DESKTOP_SESSIONS") or
+                        HOME / "Library" / "Application Support" / "Claude" / "claude-code-sessions")
 TAIL_BYTES = 512 * 1024   # transcript lines can be large; the state is in the last few entries
 WORKING_SECS = 30         # file written this recently: working
 BUSY_SECS = 20            # a tool call open this long without output: maybe waiting for a permission
 STALE_SECS = 600          # a turn still open with nothing written for this long: idle (closed, or crashed)
 RECENT_SECS = 300         # finished subagents are still listed this long
+BACKGROUND_SECS = 3600    # a background task with no news for this long, its transcript quiet too: gone
 ASKING_TOOLS = {"AskUserQuestion": "question", "ExitPlanMode": "plan approval"}
-ORDER = {"question": 0, "your-turn": 1, "busy": 2, "working": 3, "idle": 4}
+# Claude Code reports a background command or subagent's end as a task notification, in a queued_command
+# attachment or a user message: <task-notification><task-id>…</task-id>…<status>completed</status>…
+NOTIFICATION = re.compile(r"<task-id>([^<]+)</task-id>.*?<status>(\w+)</status>", re.S)
+ORDER = {"question": 0, "your-turn": 1, "busy": 2, "working": 3, "background": 4, "idle": 5}
+ACTIVE = ("busy", "working", "background")  # states with a turn time
 WAITING = ("question", "your-turn")
 # What one snapshot carries, to keep it small for the boards (about 2 MB of RAM, and 16 KB per USB line)
-PER_TOOL, TITLE_LEN, SUBS, SUB_TYPE_LEN, SUB_DESC_LEN = 8, 48, 3, 12, 40
+PER_TOOL, TITLE_LEN, SUBS, SUB_TYPE_LEN, SUB_DESC_LEN, SAID_LEN, DOING_LEN = 8, 48, 3, 12, 40, 280, 60
 # Subagent types that say nothing (the boards show the description alone); a "plugin:" prefix is dropped
 GENERIC_TYPES = {"general-purpose", "general", "agent", "fork", "default", "subagent", "build", "worker"}
+
+
+SHARE_TEXT = [False]  # --text: the agents' latest replies and tool calls go in the snapshot too
+# What the boards' font can't draw, in ASCII; and markdown that would only clutter a few lines of text
+ASCII = {"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"', "\u2013": "-", "\u2014": "-",
+         "\u2026": "...", "\u2192": "->", "\u2022": "-", "\u00a0": " ", "\u2713": "v", "\u00d7": "x"}
+MARKUP = re.compile(r"\*\*|__|`+|^#+\s*", re.M)
+TOOL_HINT = ("description", "command", "cmd", "file_path", "filePath", "path", "pattern", "url", "query")
+
+
+def plain(text):
+    """Text as the boards' font can draw it: ASCII, markdown emphasis dropped, on one line."""
+    text = MARKUP.sub("", str(text or ""))
+    text = "".join(ASCII.get(ch, ch) for ch in text).encode("ascii", "ignore").decode()
+    return " ".join(text.split())
+
+
+def tail_text(text, n=SAID_LEN):
+    """The end of text in at most n characters, from the start of a word, with "..." where it's cut."""
+    t = plain(text)
+    if len(t) <= n:
+        return t
+    t = t[-(n - 3):]
+    cut = t.find(" ")
+    return "..." + (t[cut + 1:] if 0 <= cut < 20 else t)
+
+
+def doing_text(name, args):
+    """A tool call as "Bash: Run the tests": its description, else its command, path or the like."""
+    hint = ""
+    if isinstance(args, dict):
+        for k in TOOL_HINT:
+            v = args.get(k)
+            if isinstance(v, list):
+                v = " ".join(str(x) for x in v)
+            if v:
+                hint = str(v)
+                break
+    return clip(plain(name + (": " + hint if hint else "")), DOING_LEN)
 
 
 def clip(s, n):
@@ -161,6 +212,29 @@ def conversation_state(entries):
     return "other", ""
 
 
+def claude_text(entries):
+    """(the latest reply's text, its open tool call) from a transcript's entries: what the agent wrote,
+    never your prompts."""
+    said, pending = "", {}
+    for e in entries:
+        content = (e.get("message") or {}).get("content")
+        if e.get("type") == "assistant" and isinstance(content, list):
+            texts = [c.get("text") or "" for c in content if isinstance(c, dict) and c.get("type") == "text"]
+            if any(t.strip() for t in texts):
+                said = " ".join(texts)
+            for c in content:
+                if isinstance(c, dict) and c.get("type") == "tool_use":
+                    pending[c.get("id")] = doing_text(c.get("name") or "tool", c.get("input"))
+        elif e.get("type") == "user":
+            results = [c for c in content if isinstance(c, dict) and c.get("type") == "tool_result"] \
+                if isinstance(content, list) else []
+            if not results:
+                pending.clear()  # a new prompt
+            for c in results:
+                pending.pop(c.get("tool_use_id"), None)
+    return said, (list(pending.values())[-1] if pending else "")
+
+
 def turn_started(entries):
     """When the current turn began: the last prompt (a user entry that isn't only tool results), or, with
     no prompt in the tail, its earliest entry (the turn began before that). None without timestamps."""
@@ -174,21 +248,120 @@ def turn_started(entries):
         if isinstance(content, list) and any(isinstance(c, dict) and c.get("type") == "tool_result"
                                              for c in content):
             continue
+        if isinstance(content, str) and content.lstrip().startswith("<task-notification>"):
+            continue  # a background task's news, not your prompt
         start = ts or start
     return start or first
 
 
-def title_of(session_dir, entries, project_dir):
+def background_tasks(entries):
+    """Background commands and subagents (run_in_background) the session started and hasn't heard the end
+    of: {task id: the tool call, as doing_text}."""
+    return background_update(entries, {}, {})
+
+
+_background = {}  # transcript -> [bytes read, {task id: doing}, {tool_use id: doing}]
+BACKGROUND_MARKS = (b"backgroundTaskId", b"isAsync", b"async_launched", b"task-notification", b'"tool_use"')
+
+
+def background_in(path):
+    """background_tasks() of a whole transcript (a launch can be much further back than the tail we read
+    for the state), reading only what was added since the last scan."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return {}
+    st = _background.get(path)
+    if st is None or size < st[0]:
+        st = _background[path] = [0, {}, {}]
+    if size > st[0]:
+        try:
+            with open(path, "rb") as f:
+                f.seek(st[0])
+                data = f.read(size - st[0])
+        except OSError:
+            return st[1]
+        end = data.rfind(b"\n") + 1  # whole lines only; a line being written is read next time
+        entries = []
+        for line in data[:end].split(b"\n"):
+            if any(m in line for m in BACKGROUND_MARKS):
+                try:
+                    entries.append(json.loads(line))
+                except ValueError:
+                    pass
+        st[0] += end
+        background_update(entries, st[1], st[2])
+        if len(st[2]) > 500:  # labels of old tool calls: keep the newest
+            for k in list(st[2])[:-200]:
+                del st[2][k]
+    return st[1]
+
+
+def background_update(entries, running, uses):
+    """Adds the background tasks started in entries to running, and removes those that ended."""
+    for e in entries:
+        content = (e.get("message") or {}).get("content")
+        if e.get("type") == "assistant" and isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get("type") == "tool_use":
+                    uses[c.get("id")] = doing_text(c.get("name") or "tool", c.get("input"))
+        r = e.get("toolUseResult")
+        if isinstance(r, dict):
+            tid = r.get("backgroundTaskId") or (r.get("agentId") if r.get("isAsync") or
+                                                r.get("status") == "async_launched" else None)
+            if tid:
+                use = [c.get("tool_use_id") for c in content if isinstance(c, dict) and
+                       c.get("type") == "tool_result"] if isinstance(content, list) else []
+                running[str(tid)] = uses.get(use[0] if use else None, "")
+        news = content if isinstance(content, str) else ""
+        if isinstance(e.get("attachment"), dict):
+            news += json.dumps(e["attachment"])
+        if "task-notification" in news:
+            for tid, status in NOTIFICATION.findall(news):
+                if status not in ("running", "started"):
+                    running.pop(tid, None)
+    return running
+
+
+_desktop = {}  # desktop session file -> (mtime, cliSessionId, title, archived)
+
+
+def desktop_sessions():
+    """{Claude Code session id: (title, archived)} for sessions run in the Claude desktop app, whose own
+    title (the one in its sidebar, renamed there) is the one to show. Files are re-read when they change."""
+    out, seen = {}, set()
+    for f in glob.glob(str(DESKTOP_SESSIONS / "*" / "*" / "local_*.json")):
+        seen.add(f)
+        try:
+            mtime = os.path.getmtime(f)
+            hit = _desktop.get(f)
+            if not hit or hit[0] != mtime:
+                d = json.loads(Path(f).read_text())
+                hit = _desktop[f] = (mtime, d.get("cliSessionId"), d.get("title"), bool(d.get("isArchived")))
+        except (OSError, ValueError, AttributeError):
+            continue
+        if hit[1]:
+            out[hit[1]] = (hit[2], hit[3])
+    for f in set(_desktop) - seen:
+        del _desktop[f]
+    return out
+
+
+def title_of(session_dir, entries, project_dir, desktop_title=None):
+    """The desktop app's title, else the latest rename in the transcript (/rename writes custom-title and
+    agent-name entries; custom-title.json can be left behind), else custom-title.json, else the folder."""
+    if desktop_title:
+        return desktop_title
+    for e in reversed(entries):
+        for key in ("customTitle", "agentName"):
+            if e.get(key):
+                return e[key]
     try:
         t = json.loads((session_dir / "custom-title.json").read_text()).get("customTitle")
         if t:
             return t
     except (OSError, ValueError):
         pass
-    for e in reversed(entries):
-        for key in ("customTitle", "agentName"):
-            if e.get(key):
-                return e[key]
     return project_dir.name.rsplit("-", 1)[-1] or project_dir.name
 
 
@@ -217,13 +390,18 @@ def subagents(session_dir, now):
 
 
 def busy_with_subagents(s):
-    """A session waiting on its own running subagents is working, not waiting on you."""
-    if s["state"] in ("busy", "idle") and any(not x.get("done") for x in s["subagents"]):
-        s["state"] = "working"
+    """A session waiting on its own running subagents is working, not waiting on you; one that has finished
+    its turn waits for them in the background (they report back to it)."""
+    if any(not x.get("done") for x in s["subagents"]):
+        if s["state"] in ("busy", "idle"):
+            s["state"] = "working"
+        elif s["state"] == "your-turn":
+            s["state"] = "background"
 
 
 def claude_sessions(hours, now):
     sessions = []
+    desktop = desktop_sessions()
     for path in glob.glob(str(PROJECTS / "*" / "*.jsonl")):
         try:
             mtime = os.path.getmtime(path)
@@ -232,6 +410,9 @@ def claude_sessions(hours, now):
         if now - mtime > hours * 3600:
             continue
         p = Path(path)
+        desktop_title, archived = desktop.get(p.stem, (None, False))
+        if archived:
+            continue  # archived in the desktop app
         session_dir = p.with_suffix("")
         entries = tail_entries(p)
         conv, detail = conversation_state(entries)
@@ -244,9 +425,17 @@ def claude_sessions(hours, now):
             state = "busy" if age > BUSY_SECS else "working"
         else:
             state = "working" if age < WORKING_SECS else "idle"
-        s = {"id": p.stem, "title": title_of(session_dir, entries, p.parent), "state": state,
+        s = {"id": p.stem, "title": title_of(session_dir, entries, p.parent, desktop_title), "state": state,
              "detail": detail, "since": int(mtime), "turn": turn_started(entries),
              "subagents": subagents(session_dir, now)}
+        if SHARE_TEXT[0]:
+            s["said"], s["doing"] = claude_text(entries)
+        background = background_in(path) if age < BACKGROUND_SECS else {}
+        if background and s["state"] in ("your-turn", "idle"):
+            # Its turn is over but it waits for a background command or subagent, which will wake it
+            s["state"], s["detail"] = "background", ""
+            if SHARE_TEXT[0] and not s.get("doing"):
+                s["doing"] = list(background.values())[-1] or "background task"
         busy_with_subagents(s)
         sessions.append(s)
     return sessions
@@ -295,6 +484,31 @@ def codex_turn(entries):
     return turn, calls, last, error, start or first
 
 
+def codex_text(entries):
+    """(the latest reply's text, its open tool call) from a rollout's entries: what the agent wrote."""
+    said, calls = "", {}
+    for e in entries:
+        p = e.get("payload")
+        if e.get("type") != "response_item" or not isinstance(p, dict):
+            continue
+        t = p.get("type")
+        if t == "message" and p.get("role") == "assistant":
+            texts = [c.get("text") or "" for c in p.get("content") or []
+                     if isinstance(c, dict) and c.get("type") == "output_text"]
+            if any(x.strip() for x in texts):
+                said = " ".join(texts)
+        elif t in ("function_call", "custom_tool_call"):
+            args = p.get("arguments")
+            try:
+                args = json.loads(args) if isinstance(args, str) else args
+            except ValueError:
+                args = None
+            calls[p.get("call_id")] = doing_text(p.get("name") or "tool", args)
+        elif t in ("function_call_output", "custom_tool_call_output"):
+            calls.pop(p.get("call_id"), None)
+    return said, (list(calls.values())[-1] if calls else "")
+
+
 def codex_meta(path):
     """The session_meta payload of a rollout (cached: it never changes), or {}."""
     if path not in _codex_meta:
@@ -307,10 +521,12 @@ def codex_meta(path):
 
 
 def codex_tail(path, size, mtime):
-    key = (size, mtime)
+    """codex_turn() of the rollout's tail, and codex_text() with --text; cached until the file changes."""
+    key = (size, mtime, SHARE_TEXT[0])
     hit = _codex_tail.get(path)
     if not hit or hit[0] != key:
-        hit = _codex_tail[path] = (key, codex_turn(tail_entries(path)))
+        entries = tail_entries(path)
+        hit = _codex_tail[path] = (key, codex_turn(entries) + (codex_text(entries) if SHARE_TEXT[0] else ("", "")))
     return hit[1]
 
 
@@ -370,17 +586,17 @@ def codex_sessions(hours, now):
             continue
         if st.st_mtime < cutoff:
             continue
-        turn, calls, last, error, start = codex_tail(path, st.st_size, st.st_mtime)
+        turn, calls, last, error, start, said, doing = codex_tail(path, st.st_size, st.st_mtime)
         if not last or last < cutoff:  # only touched by the app's settings, not active
             continue
         meta = codex_meta(path)
         tid = meta.get("id") or (UUID.findall(Path(path).stem) or [Path(path).stem])[0]
-        found.append((tid, meta, turn, calls, last, error, start))
+        found.append((tid, meta, turn, calls, last, error, start, said, doing))
     ids = [f[0] for f in found]
     threads, edges = codex_threads(ids)
     names = codex_titles()
     top, children = {}, []
-    for tid, meta, turn, calls, last, error, started in found:
+    for tid, meta, turn, calls, last, error, started, said, doing in found:
         if threads.get(tid, (0,))[0]:
             continue  # archived in the app
         age = now - last
@@ -401,7 +617,7 @@ def codex_sessions(hours, now):
             state = "idle"
         title = names.get(tid) or (threads.get(tid) or (0, None))[1] or Path(meta.get("cwd") or "codex").name
         s = {"id": tid, "title": title, "state": state, "detail": detail, "since": int(last), "turn": started,
-             "subagents": []}
+             "said": said, "doing": doing, "subagents": []}
         sub = source.get("subagent") if isinstance(source, dict) else None
         if sub is not None or tid in edges:
             spawn = sub.get("thread_spawn") if isinstance(sub, dict) else None
@@ -436,7 +652,7 @@ SUBAGENT_SUFFIX = re.compile(r"\s*\(@([\w.-]+) subagent\)\s*$")
 
 def opencode_read(db, cutoff_ms):
     """[(session row, last message data or None, its open tool calls [tool name], activity ms,
-    the last prompt's time ms or None)]"""
+    the last prompt's time ms or None, with --text the latest reply's text and the open tool call)]"""
     rows = db.execute("SELECT id, parent_id, title, directory, time_updated, time_created FROM session "
                       "WHERE time_archived IS NULL AND time_updated >= ?", (cutoff_ms,)).fetchall()
     out = []
@@ -444,7 +660,7 @@ def opencode_read(db, cutoff_ms):
         activity = row[4]
         m = db.execute("SELECT id, time_updated, data FROM message WHERE session_id = ? "
                        "ORDER BY time_created DESC, id DESC LIMIT 1", (row[0],)).fetchone()
-        msg, tools = None, []
+        msg, tools, doing = None, [], ""
         if m:
             activity = max(activity, m[1])
             try:
@@ -464,10 +680,25 @@ def opencode_read(db, cutoff_ms):
                     st = part.get("state") or {}
                     if part.get("type") == "tool" and st.get("status") in ("pending", "running"):
                         tools.append(part.get("tool") or "tool")
+                        hint = st.get("input") if isinstance(st.get("input"), dict) else {}
+                        if st.get("title") and not hint.get("description"):
+                            hint = dict(hint, description=st["title"])
+                        doing = doing_text(part.get("tool") or "tool", hint)
         prompt = db.execute("SELECT MAX(time_created) FROM message WHERE session_id = ? AND "
                             "(data LIKE '%\"role\":\"user\"%' OR data LIKE '%\"role\": \"user\"%')",
                             (row[0],)).fetchone()[0]
-        out.append((row, msg, tools, activity, prompt))
+        said = ""
+        if SHARE_TEXT[0] and not row[1]:  # the latest text the agent wrote (a text part of a reply)
+            r = db.execute("SELECT p.data FROM part p JOIN message m ON p.message_id = m.id "
+                           "WHERE m.session_id = ? AND (m.data LIKE '%\"role\":\"assistant\"%' OR "
+                           "m.data LIKE '%\"role\": \"assistant\"%') AND (p.data LIKE '%\"type\":\"text\"%' OR "
+                           "p.data LIKE '%\"type\": \"text\"%') ORDER BY p.time_created DESC, p.id DESC LIMIT 1",
+                           (row[0],)).fetchone()
+            try:
+                said = (json.loads(r[0]).get("text") or "") if r else ""
+            except (ValueError, AttributeError):
+                said = ""
+        out.append((row, msg, tools, activity, prompt, said, doing))
     return out
 
 
@@ -499,7 +730,7 @@ def opencode_sessions(hours, now):
         return []
     rows = ro_query(OPENCODE_DB, lambda db: opencode_read(db, int((now - hours * 3600) * 1000)))
     top, children = {}, []
-    for row, msg, tools, activity, prompt in rows:
+    for row, msg, tools, activity, prompt, said, doing in rows:
         sid, parent, title, directory = row[:4]
         age = now - activity / 1000.0
         state, detail = opencode_state(msg, tools, age)
@@ -514,7 +745,8 @@ def opencode_sessions(hours, now):
             continue
         top[sid] = {"id": sid, "title": title or Path(directory or "opencode").name, "state": state,
                     "detail": detail, "since": int(activity / 1000),
-                    "turn": prompt / 1000.0 if prompt else None, "subagents": []}
+                    "turn": prompt / 1000.0 if prompt else None, "said": said, "doing": doing,
+                    "subagents": []}
     for parent, state, detail, sub in children:
         s = top.get(parent)
         if not s:
@@ -543,8 +775,13 @@ def compact(s, tool):
            "since": s["since"]}
     if s.get("detail"):
         out["detail"] = clip(s["detail"], 20)
-    if s["state"] in ("working", "busy") and s.get("turn"):
+    if s["state"] in ACTIVE and s.get("turn"):
         out["turn"] = int(s["turn"])  # how long it has been at it
+    if SHARE_TEXT[0]:
+        if s.get("said"):
+            out["said"] = tail_text(s["said"])
+        if s["state"] in ACTIVE and s.get("doing"):
+            out["doing"] = s["doing"]
     subs = sorted(s.get("subagents") or [], key=lambda x: (bool(x.get("done")), -x.get("since", 0)))
     if subs:
         out["subagents"] = [compact_sub(x) for x in subs[:SUBS]]  # running first, newest first
@@ -822,6 +1059,9 @@ def main():
     ap.add_argument("--usb", action="store_true", help="also feed agents displays plugged in over USB")
     ap.add_argument("--no-http", action="store_true", help="don't serve HTTP (USB only)")
     ap.add_argument("--no-advertise", action="store_true", help="don't advertise over Bonjour")
+    ap.add_argument("--text", action="store_true",
+                    help="also send the end of each session's latest reply and its current tool call, for the "
+                         "boards' session page (they reach anything that can reach the port)")
     a = ap.parse_args()
     sources = None
     if a.sources:
@@ -830,6 +1070,7 @@ def main():
         if unknown or not sources:
             ap.error("--sources: unknown %s (choose from %s)"
                      % (",".join(unknown) or "none", ",".join(SOURCES)))
+    SHARE_TEXT[0] = a.text
     if a.once:
         print(json.dumps(snapshot(a.hours, sources), indent=2))
         return

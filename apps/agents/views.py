@@ -1,23 +1,27 @@
-# The agents screens of apps/agents: one view per tool (Claude Code, Codex, opencode), from a snapshot of
-# extras/agents_watch.py. A row is a state symbol, the title and how long it has been in that state:
-#   > Port the board app          run 12m   working (or busy) for 12 minutes, since your prompt
-#   ? Release notes                ask 3m   asking you something for 3 minutes
-#   ! Fix the parser              idle 9m   finished its turn 9 minutes ago (idle: likewise)
-#     + Explore: find tests            2m   a running subagent, and for how long
-#     v write the summary                              one that finished in the last few minutes (drawn as a
-#                                                      check mark: CHECK in the text marks where)
+# The agents screens of apps/agents, from a snapshot of extras/agents_watch.py: four cards side by side,
+# each under one of the MagTag's four LEDs and above one of its four buttons, and a page for one session. A card is an icon for the state and how long it has been in it, the title, its subagents
+# (+ running, a check mark finished) and the tool:
+#   ? 3m    a question or choice open for you, 3 minutes   > 12m   working on this turn for 12 minutes
+#   || 9m   paused: finished its turn 9 minutes ago        ~ 2m    busy: a long command or a permission
+#   * 12m   its turn is over, but it waits on its own              prompt
+#           background command or subagent                 z 2h    idle for 2 hours
+# (code.py draws the icons: a question mark, a pause sign, a gear, a play triangle, an hourglass, a Z)
+# Cards that wait for you (and haven't been looked at) get a black bar along their top, under their lit LED.
+# A button opens a page for its column's session: what it's doing, its subagents, and how its latest reply
+# ends (a frozen frame; the board goes back to the grid by itself).
 # Plain Python, so the host's unit tests can import it too. CircuitPython's str has no ljust/rjust/center:
 # use pad() and rjust().
-TOOLS = ("claude", "codex", "opencode")
-CYCLE = TOOLS + ("quote",)         # button A's order
 SHORT = {"claude": "Claude", "codex": "Codex", "opencode": "opencode"}
 LONG = {"claude": "Claude Code", "codex": "Codex", "opencode": "opencode"}
 WAITING = ("question", "your-turn")
-SYMBOL = {"question": "?", "your-turn": "!", "busy": "~", "working": ">", "idle": "."}
+STATES = ("question", "your-turn", "busy", "working", "background", "idle")
+ACTIVE = ("busy", "working", "background")  # timed from the turn's prompt
+WORDS = {"question": "QUESTION FOR YOU", "your-turn": "YOUR TURN", "busy": "BUSY", "working": "WORKING",
+         "background": "BACKGROUND", "idle": "IDLE"}
 # Subagent types that say nothing: the line shows the description alone (old watchers send these)
 GENERIC = ("general-purpose", "general", "agent", "fork", "default", "subagent", "build", "worker")
 TYPE_LEN = 12
-SUBS = 3  # subagent lines per session
+FRESH = 3600    # a session waiting longer than this no longer counts as new
 CHECK = "\x01"  # terminalio's font has no check mark, so code.py draws one where this character is
 
 
@@ -33,41 +37,8 @@ def tool_of(s):
     return s.get("tool") or "claude"  # watchers before Codex and opencode sent no tool
 
 
-def waiting_by_tool(d):
-    """{tool: sessions waiting for you}, from the watcher's totals if it sends them (they count sessions
-    beyond those it sends), else from the sessions."""
-    out = {}
-    for s in d.get("sessions", []):
-        if s.get("state") in WAITING:
-            t = tool_of(s)
-            out[t] = out.get(t, 0) + 1
-    tools = d.get("tools")
-    if isinstance(tools, dict):
-        for t, v in tools.items():
-            if isinstance(v, dict) and "waiting" in v:
-                out[t] = v["waiting"]
-    return out
-
-
-def views(d):
-    """The views button A cycles through: every tool the watcher reads (its "tools" field lists them, even
-    with no sessions, so a quiet tool still has a view), then the quote. An older watcher without that
-    field: Claude, plus any tool that has sessions."""
-    if isinstance(d.get("tools"), dict) and d["tools"]:
-        have = set(d["tools"]) | set(tool_of(s) for s in d.get("sessions", []))
-    else:
-        have = set(["claude"]) | set(tool_of(s) for s in d.get("sessions", []))
-    return [v for v in CYCLE if v == "quote" or v in have]
-
-
-def next_view(view, d):
-    vs = views(d)
-    i = CYCLE.index(view) if view in CYCLE else -1
-    for k in range(1, len(CYCLE) + 1):
-        v = CYCLE[(i + k) % len(CYCLE)]
-        if v in vs:
-            return v
-    return "claude"
+def key(s):
+    return tool_of(s) + ":" + str(s.get("id", ""))
 
 
 def age(seconds):
@@ -82,38 +53,69 @@ def age(seconds):
     return "%dh" % (m // 60)
 
 
-def timing(s, gen):
-    """The right-hand column of a session's row: how long it has worked on this turn (from the prompt; a
-    watcher from before "turn" doesn't say), has been asking you, or has done nothing (its turn over)."""
-    state = s.get("state")
-    if state in ("working", "busy"):
-        return "run " + age(gen - s["turn"]) if s.get("turn") else ""
-    since = s.get("since", gen)
-    return ("ask " if state == "question" else "idle ") + age(gen - since)
+def elapsed(s, gen):
+    """How long the session has been in its state: working (busy, in the background) since the turn's
+    prompt, otherwise since it last did anything. "" for a working session from a watcher that sends no
+    turn times."""
+    if s.get("state") in ACTIVE:
+        return age(gen - s["turn"]) if s.get("turn") else ""
+    return age(gen - s.get("since", gen))
 
 
-def header(tool, waiting, offline, clock, width):
-    """The view's first line, left part: the longest wording that fits in width."""
-    name, short = LONG.get(tool, tool).upper(), SHORT.get(tool, tool).upper()
-    if offline:
-        options = ["WATCHER OFFLINE since " + clock, "OFFLINE since " + clock, "OFFLINE"]
-    elif waiting:
-        options = ["%s  %d waiting" % (name, waiting), "%s  %d waiting" % (short, waiting),
-                   "%s %d wait" % (short, waiting)]
-    else:
-        options = [name, short]
-    for h in options:
-        if len(h) <= width:
-            return h
-    return options[-1]
+def needs_you(s, gen, acked):
+    """Waiting for you, recently, and not yet looked at (acked holds (id, since) of those that were)."""
+    return (s.get("state") in WAITING and gen - s.get("since", gen) < FRESH
+            and (s.get("id"), s.get("since")) not in acked)
 
 
-def row(mark, text, right, cols):
-    """mark + text, with `right` (an age, or "") flush right, in cols - 1 characters."""
-    width = cols - 1 - len(mark)
-    if right:
-        return mark + pad(text, width - len(right) - 1) + " " + right
-    return mark + pad(text, width)
+def ranked(d, acked):
+    """The sessions in the order the cards take them: waiting for you, then busy, working and in the
+    background, then the rest (looked at, or idle); the most recently active first within each."""
+    gen = d.get("generated", 0)
+
+    def rank(s):
+        if needs_you(s, gen, acked):
+            r = 0
+        elif s.get("state") in ACTIVE:
+            r = 1
+        else:
+            r = 2
+        return (r, -s.get("since", 0))
+    return sorted([s for s in d.get("sessions", []) if s.get("state") in STATES], key=rank)
+
+
+def assign(slots, keys, n):
+    """The cards' places: the first n of keys, those already on screen (slots, None for an empty place)
+    staying where they were, so a card doesn't jump to another column (and LED) as others change."""
+    want = keys[:n]
+    out = [k if k in want else None for k in (list(slots) + [None] * n)[:n]]
+    for k in want:
+        if k not in out:
+            out[out.index(None)] = k
+    return out
+
+
+def wrap(text, width, rows):
+    """text in at most rows lines of at most width characters; a word longer than a line is cut, and text
+    that doesn't fit ends in ~ on the last line."""
+    lines, line = [], ""
+    for word in text.split():
+        while len(word) > width:
+            if line:
+                lines.append(line)
+                line = ""
+            lines.append(word[:width])
+            word = word[width:]
+        if line and len(line) + 1 + len(word) > width:
+            lines.append(line)
+            line = word
+        else:
+            line = line + " " + word if line else word
+    if line:
+        lines.append(line)
+    if len(lines) > rows:  # the last line takes as much of the rest as fits
+        lines = lines[:rows - 1] + [" ".join(lines[rows - 1:])[:width - 1] + "~"]
+    return lines
 
 
 def sub_text(sub):
@@ -125,30 +127,63 @@ def sub_text(sub):
     return desc or t
 
 
-def agent_lines(d, tool, cols, rows, offline, source):
-    """The text of one tool's view, at most `rows` lines of at most cols - 1 characters (the last column
-    stays blank, as a margin)."""
-    sessions = [s for s in d.get("sessions", []) if tool_of(s) == tool]
-    gen = d.get("generated", 0)
-    head = header(tool, waiting_by_tool(d).get(tool), offline, d.get("clock", "?"), cols - 12)
-    tail = (source + " " if source else "") + d.get("clock", "")
-    lines = [pad(head, cols - 12) + rjust(tail, 11)]  # the tool's name heads the view; no tab line
-    if not sessions:
-        lines.append("no recent %s sessions" % LONG.get(tool, tool))
-        lines.append("(watcher --hours: how far back)")
-    for s in sessions:
-        state = s.get("state")
-        if state not in SYMBOL:
-            continue
-        lines.append(row(SYMBOL[state] + " ", s.get("title", ""), timing(s, gen), cols))
-        subs = s.get("subagents") or []
-        for sub in subs[:SUBS]:
-            done = sub.get("done")
-            right = "" if done or not sub.get("since") else age(gen - sub["since"])
-            lines.append(row("  " + CHECK + " " if done else "  + ", sub_text(sub), right, cols))
-        more = max(len(subs), s.get("nsub", 0)) - SUBS
-        if more > 0:
-            lines.append("    +%d more" % more)
-    if len(lines) > rows:
-        lines = lines[:rows - 1] + ["... %d more lines" % (len(lines) - rows + 1)]
-    return lines
+def sub_line(sub, gen, width):
+    """A subagent in width characters: + running (and for how long) or a check mark finished, its text."""
+    right = "" if sub.get("done") or not sub.get("since") else " " + age(gen - sub["since"])
+    return (CHECK if sub.get("done") else "+") + pad(sub_text(sub), width - 1 - len(right)) + right
+
+
+def card(s, gen, acked):
+    """What one card shows, as a tuple the board compares to tell when to redraw:
+    (state, elapsed, title lines, subagent lines, footer, marked: waiting for you).
+    The title takes 4 lines of 8 (the larger font); with subagents, 2 lines, then up to 3 subagents in 12."""
+    subs = s.get("subagents") or []
+    nsub = max(len(subs), s.get("nsub", 0))
+    title = s.get("title", "") or "?"
+    if subs:
+        lines = wrap(title, 8, 2)
+        shown = [sub_line(x, gen, 12) for x in subs[:3]]
+    else:
+        lines, shown = wrap(title, 8, 4), []
+    footer = SHORT.get(tool_of(s), tool_of(s)).lower()
+    if nsub > len(shown):
+        footer += " +%d" % (nsub - len(shown))
+    return (s.get("state"), elapsed(s, gen), tuple(lines), tuple(shown), footer, needs_you(s, gen, acked))
+
+
+def page(s, gen, head_cols, body_cols, body_rows):
+    """One session's page, frozen when it opens: (head, body).
+    head: 2 lines of the larger font, head_cols - 1 wide (the first two characters are left for code.py's
+    icon): the state, for how long and the tool; the title. body: up to body_rows lines of the small font,
+    body_cols - 1 wide: what it's doing now, its subagents, and the end of its latest reply ("said", from a
+    watcher run with --text), as much of it as fits."""
+    width = head_cols - 1
+    state = s.get("state")
+    words = WORDS.get(state, state or "")
+    left = "  " + words + "  " + elapsed(s, gen)
+    tool = LONG.get(tool_of(s), tool_of(s)).upper()
+    if len(left) + 1 + len(tool) > width:
+        tool = SHORT.get(tool_of(s), tool_of(s)).upper()
+    head = [pad(left, width - len(tool)) + tool, wrap(s.get("title", ""), width, 1)[0] if s.get("title") else ""]
+
+    bw = body_cols - 1
+    body = []
+    doing = s.get("doing") or (s.get("detail") if state == "busy" else "")
+    if doing:
+        body.append(("> " + doing)[:bw])
+    subs = s.get("subagents") or []
+    nsub = max(len(subs), s.get("nsub", 0))
+    body += [sub_line(x, gen, bw) for x in subs[:3]]
+    if nsub > 3:
+        body.append("+%d more" % (nsub - 3))
+    said = s.get("said") or ""
+    room = body_rows - len(body) - (1 if body and said else 0)
+    if said and room > 0:
+        if body:
+            body.append("")
+        body += wrap(said, bw, 1000)[-room:]  # the end of the reply: where it got to
+    if not body:
+        body.append("Nothing more to show. To see how each")
+        body.append("agent's latest reply ends, run the watcher")
+        body.append("with --text.")
+    return head, body[:body_rows]

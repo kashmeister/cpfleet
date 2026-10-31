@@ -35,6 +35,7 @@ def isolate(root):
     aw.PROJECTS = root / "claude-projects"
     aw.CODEX_HOME = root / "codex"
     aw.OPENCODE_DB = root / "opencode.db"
+    aw.DESKTOP_SESSIONS = root / "desktop"
     aw._codex_meta.clear()
     aw._codex_tail.clear()
     aw._codex_index[:] = [None, {}]
@@ -177,6 +178,24 @@ class CodexSource(CodexFixture, unittest.TestCase):
         self.assertEqual(aw.codex_turn(entries)[:2], ("task_complete", {}))
         self.assertTrue(aw.codex_turn(entries)[3])
 
+    def test_text_only_with_the_flag(self):
+        entries = [{"timestamp": isotime(a), "type": k, "payload": p} for a, k, p in [
+            started(30),
+            item(25, "message", role="user", content=[{"type": "input_text", "text": "my prompt"}]),
+            item(20, "message", role="assistant", content=[{"type": "output_text", "text": "Looking \u2014 now."}]),
+            item(10, "function_call", call_id="c", name="exec_command", arguments='{"cmd": ["make", "test"]}')]]
+        self.assertEqual(aw.codex_text(entries), ("Looking \u2014 now.", "exec_command: make test"))
+        self.assertEqual(aw.codex_text(entries[:3]), ("Looking \u2014 now.", ""))  # never the prompt
+        s = {"id": "t", "title": "x", "state": "working", "since": 1, "said": "Looking \u2014 now.",
+             "doing": "exec_command: make test"}
+        self.assertNotIn("said", aw.compact(s, "codex"))
+        aw.SHARE_TEXT[0] = True
+        try:
+            out = aw.compact(s, "codex")
+        finally:
+            aw.SHARE_TEXT[0] = False
+        self.assertEqual((out["said"], out["doing"]), ("Looking - now.", "exec_command: make test"))
+
     def test_locked_database_is_skipped_not_fatal(self):
         db = sqlite3.connect(str(self.codex / "state_5.sqlite"), timeout=0)
         db.execute("BEGIN EXCLUSIVE")
@@ -223,7 +242,7 @@ class OpencodeFixture:
                         "VALUES (?, 'p', ?, 's', '/Users/me/code/app', ?, '1.3.3', ?, ?, ?)",
                         (sid, parent, title, ms(age + 600), ms(age), ms(age) if archived else None))
 
-    def oc_message(self, sid, age, role="assistant", completed=True, finish="stop", tools=(), **extra):
+    def oc_message(self, sid, age, role="assistant", completed=True, finish="stop", tools=(), parts=(), **extra):
         self.n += 1
         mid = "msg_%03d" % self.n
         t = {"created": ms(age + 5)}
@@ -234,20 +253,24 @@ class OpencodeFixture:
             data["finish"] = finish
         self.oc.execute("INSERT INTO message VALUES (?, ?, ?, ?, ?)", (mid, sid, ms(age + 5), ms(age),
                                                                        json.dumps(data)))
-        for i, (tool, status) in enumerate(tools):
-            part = {"type": "tool", "tool": tool, "callID": "c%d" % i,
-                    "state": {"status": status, "input": {}, "time": {"start": ms(age)}}}
+        for i, tool in enumerate(tools):
+            name, status, args = (tuple(tool) + ({},))[:3]
+            part = {"type": "tool", "tool": name, "callID": "c%d" % i,
+                    "state": {"status": status, "input": args, "time": {"start": ms(age)}}}
             self.oc.execute("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
                             ("prt_%03d_%d" % (self.n, i), mid, sid, ms(age), ms(age), json.dumps(part)))
+        for i, part in enumerate(parts):
+            self.oc.execute("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+                            ("prt_%03d_t%d" % (self.n, i), mid, sid, ms(age), ms(age), json.dumps(part)))
         return mid
 
     def opencode_world(self):
         self.make_opencode()
         s = self.oc_session
         s("ses_done", "Plan the release", 120)
-        self.oc_message("ses_done", 120)
+        self.oc_message("ses_done", 120, parts=[{"type": "text", "text": "Released it."}])
         s("ses_bash", "Run the build", 60)
-        self.oc_message("ses_bash", 60, completed=False, tools=[("read", "completed"), ("bash", "running")])
+        self.oc_message("ses_bash", 60, completed=False, tools=[("read", "completed"), ("bash", "running", {"command": "npm run build"})])
         s("ses_ask", "Pick a name", 30)
         self.oc_message("ses_ask", 30, completed=False, tools=[("question", "running")])
         s("ses_lead", "Refactor the parser", 100)
@@ -299,6 +322,16 @@ class OpencodeSource(OpencodeFixture, unittest.TestCase):
         sub = got["Write the docs"]["subagents"][0]
         self.assertEqual((sub["type"], sub["desc"]), ("general", "ask about style"))
         self.assertEqual(aw.compact_sub(sub)["type"], "")  # generic: the boards show the description
+
+    def test_text_with_the_flag(self):
+        self.oc_message("ses_done", 119, role="user", parts=[{"type": "text", "text": "a prompt"}])
+        aw.SHARE_TEXT[0] = True
+        try:
+            got = {s["title"]: s for s in aw.opencode_sessions(3, time.time())}
+        finally:
+            aw.SHARE_TEXT[0] = False
+        self.assertEqual(got["Plan the release"]["said"], "Released it.")  # the reply, not the later prompt
+        self.assertEqual(got["Run the build"]["doing"], "bash: npm run build")
 
     def test_unreadable_database_keeps_the_last_sessions(self):
         self.oc.close()
@@ -388,118 +421,85 @@ class MergedSnapshot(CodexFixture, OpencodeFixture, unittest.TestCase):
 
 # ---- the board's views ---------------------------------------------------------------------------------
 
-COLS, ROWS = 296 // 6, 128 // 12  # the MagTag with terminalio's font
-
-OLD = {"generated": 1000, "clock": "12:00", "host": "mac", "waiting": 1,  # a watcher from before Codex
-       "sessions": [{"id": "a1b2c3d4-0000", "title": "Old format", "state": "your-turn", "detail": "",
-                     "since": 900, "subagents": [{"type": "Explore", "desc": "find tests"}]}]}
-
-NEW = {"generated": 1000, "clock": "12:00", "host": "mac", "waiting": 3,
-       "tools": {"claude": {"n": 1, "waiting": 0}, "codex": {"n": 2, "waiting": 2},
-                 "opencode": {"n": 0, "waiting": 0}},
-       "sessions": [{"id": "c1", "tool": "codex", "title": "Ship it", "state": "your-turn", "since": 990},
-                    {"id": "c2", "tool": "codex", "title": "x" * 60, "state": "question", "since": 980,
-                     "subagents": [{"type": "worker", "desc": "y" * 40}] * 3, "nsub": 5},
-                    {"id": "a1", "tool": "claude", "title": "Claude one", "state": "working", "since": 999}]}
+GEN = 10000
+SESSIONS = [
+    {"id": "w1", "tool": "claude", "title": "Port the board app to the grid", "state": "working", "since": GEN - 5,
+     "turn": GEN - 750, "subagents": [{"type": "Explore", "desc": "find tests", "since": GEN - 130},
+                                      {"type": "general-purpose", "desc": "write the summary", "done": 1},
+                                      {"type": "Plan", "desc": "layout", "since": GEN - 20}], "nsub": 5},
+    {"id": "q1", "tool": "codex", "title": "Pick a name", "state": "question", "since": GEN - 200},
+    {"id": "i1", "tool": "claude", "title": "Old work", "state": "idle", "since": GEN - 7300},
+    {"id": "y1", "tool": "opencode", "title": "Fix the parser", "state": "your-turn", "since": GEN - 540},
+    {"id": "y2", "tool": "claude", "title": "Seen already", "state": "your-turn", "since": GEN - 60},
+    {"id": "b1", "tool": "claude", "title": "Run the build", "state": "busy", "since": GEN - 30, "turn": GEN - 200,
+     "detail": "Bash"},
+]
+SNAP = {"generated": GEN, "sessions": SESSIONS}
 
 
 class BoardViews(unittest.TestCase):
-    def check_fits(self, lines):
-        self.assertLessEqual(len(lines), ROWS)
-        for line in lines:
-            self.assertLess(len(line), COLS, line)  # Terminal wraps a full-width line
+    def test_order_waiting_then_active_then_rest(self):
+        acked = {("y2", GEN - 60)}
+        got = [s["id"] for s in views.ranked(SNAP, acked)]
+        self.assertEqual(got, ["q1", "y1", "w1", "b1", "y2", "i1"])  # most recently active first in each
+        self.assertTrue(views.needs_you(SESSIONS[1], GEN, acked))
+        self.assertFalse(views.needs_you(SESSIONS[4], GEN, acked))  # looked at
+        self.assertFalse(views.needs_you(dict(SESSIONS[3], since=GEN - 4000), GEN, acked))  # too long ago
 
-    def test_old_watcher_means_claude(self):
-        self.assertEqual(views.views(OLD), ["claude", "quote"])
-        self.assertEqual(views.next_view("claude", OLD), "quote")
-        self.assertEqual(views.next_view("quote", OLD), "claude")
-        lines = views.agent_lines(OLD, "claude", COLS, ROWS, False, "WiFi")
-        self.check_fits(lines)
-        self.assertTrue(lines[0].startswith("CLAUDE CODE  1 waiting"))
-        self.assertTrue(lines[1].startswith("! Old format"))  # sessions start on line 2: no tab line
-        self.assertEqual(lines[2].rstrip(), "  + Explore: find tests")  # an old watcher: no start time
+    def test_cards_keep_their_place(self):
+        slots = views.assign([], ["a", "b", "c", "d", "e"], 4)
+        self.assertEqual(slots, ["a", "b", "c", "d"])
+        slots = views.assign(slots, ["e", "a", "c", "d", "b"], 4)  # e waits now: it takes b's place
+        self.assertEqual(slots, ["a", "e", "c", "d"])
+        self.assertEqual(views.assign(slots, ["c"], 4), [None, None, "c", None])
+        self.assertEqual(views.assign(["x"], ["a", "b"], 8), ["a", "b", None, None, None, None, None, None])
 
-    def test_views_cycle_every_tool_the_watcher_reads(self):
-        # opencode has no sessions in NEW but the watcher reads it, so it still gets a view
-        self.assertEqual(views.views(NEW), ["claude", "codex", "opencode", "quote"])
-        self.assertEqual(views.next_view("claude", NEW), "codex")
-        self.assertEqual(views.next_view("codex", NEW), "opencode")
-        self.assertEqual(views.next_view("opencode", NEW), "quote")
-        empty = views.agent_lines(NEW, "opencode", COLS, ROWS, False, "USB")
-        self.assertIn("no recent opencode sessions", empty)
-        self.check_fits(empty)
-        only_claude = dict(NEW, tools={"claude": {"n": 1, "waiting": 1}})
-        self.assertEqual(views.views(only_claude), ["claude", "codex", "quote"])  # codex: it has sessions
-        self.assertEqual(views.views({}), ["claude", "quote"])
+    def test_big_card_with_subagents(self):
+        state, el, title, subs, footer, inverted = views.card(SESSIONS[0], GEN, set())
+        self.assertEqual((state, el, inverted), ("working", "10m", False))
+        self.assertEqual(title, ("Port the", "board a~"))  # 2 lines of 8 when subagents are listed
+        self.assertEqual(subs, ("+Explore: 2m", views.CHECK + "write the s", "+Plan: l <1m"))
+        self.assertEqual(footer, "claude +2")  # 5 subagents, 3 listed
+        for line in subs:
+            self.assertEqual(len(line), 12)
 
-    def test_headers_mark_the_views_that_wait(self):
-        claude = views.agent_lines(NEW, "claude", COLS, ROWS, False, "USB")
-        self.assertTrue(claude[0].startswith("CLAUDE CODE "))
-        self.assertNotIn("waiting", claude[0])
-        codex = views.agent_lines(NEW, "codex", COLS, ROWS, False, "USB")
-        self.assertTrue(codex[0].startswith("CODEX  2 waiting"))
-        self.assertTrue(codex[0].endswith("USB 12:00"))
-        self.assertTrue(codex[1].startswith("! Ship it"))
-        self.assertTrue(codex[2].startswith("? xxxx"))
-        self.assertEqual(codex[3].rstrip(), "  + " + "y" * 40)  # worker: generic, so no type
-        self.assertIn("    +2 more", codex)
-        self.check_fits(claude)
-        self.check_fits(codex)
-        empty = views.agent_lines(NEW, "opencode", COLS, ROWS, True, "WiFi")
-        self.assertTrue(empty[0].startswith("WATCHER OFFLINE since 12:00"))
-        self.assertIn("no recent opencode sessions", empty)
+    def test_cards(self):
+        q = views.card(SESSIONS[1], GEN, set())
+        self.assertEqual(q, ("question", "3m", ("Pick a", "name"), (), "codex", True))
+        long = dict(SESSIONS[2], title="Smart Home / ESP E-INK displays for the house")
+        self.assertEqual(views.card(long, GEN, set())[2], ("Smart", "Home /", "ESP", "E-INK d~"))
+        self.assertEqual(views.card(SESSIONS[5], GEN, set())[:2], ("busy", "3m"))
+        bg = dict(SESSIONS[3], state="background", turn=GEN - 1300)  # timed from the turn, like working
+        self.assertEqual(views.card(bg, GEN, set())[:2], ("background", "20m"))
+        self.assertEqual([s["id"] for s in views.ranked({"generated": GEN, "sessions": [SESSIONS[2], bg]}, set())],
+                         ["y1", "i1"])  # in the background: with the active ones, before idle
+        old = {"id": "o", "title": "Old watcher", "state": "working", "since": GEN}  # no tool, no turn
+        self.assertEqual(views.card(old, GEN, set())[1], "")
+        self.assertEqual(views.card(old, GEN, set())[4], "claude")
 
-    def test_many_sessions_fit(self):
-        d = dict(NEW, sessions=[dict(NEW["sessions"][1], id=str(i)) for i in range(8)])
-        lines = views.agent_lines(d, "codex", COLS, ROWS, False, "WiFi")
-        self.check_fits(lines)
-        self.assertTrue(lines[-1].startswith("... "))
+    def test_wrap(self):
+        self.assertEqual(views.wrap("a supercalifragilistic word", 8, 4), ["a", "supercal", "ifragili", "stic wo~"])
+        self.assertEqual(views.wrap("", 8, 2), [])
 
-    def test_rows(self):
-        d = {"generated": 10000, "sessions": [
-            {"id": "a", "title": "Fix the parser", "state": "your-turn", "since": 10000 - 540, "subagents": [
-                {"type": "Explore", "desc": "find tests", "since": 10000 - 130},
-                {"type": "general-purpose", "desc": "Find Project Bundle", "since": 10000 - 20},
-                {"type": "codex:codex-rescue", "desc": "second opinion", "since": 9000, "done": 1},
-                {"type": "claude-code-guide", "desc": "hooks docs", "since": 9000}]},
-            {"id": "b", "title": "t" * 80, "state": "working", "since": 9990}]}  # an old watcher: no "turn"
-        lines = views.agent_lines(d, "claude", COLS, ROWS, False, "")
-        self.check_fits(lines)
-        self.assertEqual(lines[1:], [
-            "! Fix the parser" + " " * 25 + "idle 9m",
-            "  + Explore: find tests" + " " * 23 + "2m",
-            "  + Find Project Bundle" + " " * 22 + "<1m",
-            "  " + views.CHECK + " codex-rescue: second opinion" + " " * 16,  # drawn as a check mark
-            "    +1 more",
-            "> " + "t" * 46])
-        self.assertEqual({len(l) for l in lines[2:4]}, {COLS - 1})
-
-    def test_timings(self):
-        gen = 10000
-        t = views.timing
-        self.assertEqual(t({"state": "working", "since": gen - 5, "turn": gen - 750}, gen), "run 10m")
-        self.assertEqual(t({"state": "busy", "since": gen - 30, "turn": gen - 200}, gen), "run 3m")
-        self.assertEqual(t({"state": "working", "since": gen}, gen), "")  # an old watcher sends no turn
-        self.assertEqual(t({"state": "question", "since": gen - 200}, gen), "ask 3m")
-        self.assertEqual(t({"state": "your-turn", "since": gen - 30}, gen), "idle <1m")
-        self.assertEqual(t({"state": "idle", "since": gen - 7300}, gen), "idle 2h")
-
-    def test_larger_text_fits(self):
-        cols, rows = 296 // 9, 128 // 18  # terminalio's font at 1.5 times
-        d = dict(NEW, sessions=[dict(s, turn=900) for s in NEW["sessions"]] * 3)
-        for tool in ("claude", "codex", "opencode"):
-            for offline in (False, True):
-                lines = views.agent_lines(d, tool, cols, rows, offline, "WiFi")
-                self.assertLessEqual(len(lines), rows)
-                for line in lines:
-                    self.assertLess(len(line), cols, line)
-        codex = views.agent_lines(d, "codex", cols, rows, False, "WiFi")
-        self.assertEqual(codex[0], "CODEX  2 waiting     WiFi 12:00")  # the watcher's count
-        claude = views.agent_lines(d, "claude", cols, rows, False, "WiFi")
-        self.assertEqual(claude[0].split()[:1], ["CLAUDE"])
-        self.assertTrue(claude[1].startswith("> Claude one") and claude[1].endswith("run 1m"))
-        self.assertTrue(views.agent_lines(d, "claude", cols, rows, True, "WiFi")[0].startswith("OFFLINE since"))
-        self.assertEqual(views.header("claude", 2, False, "12:00", 19), "CLAUDE  2 waiting")
+    def test_page(self):
+        s = dict(SESSIONS[0], doing="Bash: Run the tests", said="First part. " + "word " * 60 + "the end.")
+        head, body = views.page(s, GEN, 32, 49, 7)
+        self.assertEqual(head, ["  WORKING  10m" + " " * 6 + "CLAUDE CODE", "Port the board app to the grid"])
+        self.assertEqual(body[0], "> Bash: Run the tests")
+        self.assertEqual([l.split()[0] for l in body[1:4]], ["+Explore:", views.CHECK + "write", "+Plan:"])
+        self.assertEqual(body[4], "+2 more")
+        self.assertEqual(body[5], "")
+        self.assertTrue(body[6].endswith("the end."))  # as much of the reply as fits, from its end
+        self.assertEqual(len(body), 7)
+        for line in head + body:
+            self.assertLess(len(line), 49, line)
+        quiet = {"id": "x", "title": "Plain", "state": "your-turn", "since": GEN - 60,
+                 "said": "All done: the grid is live."}
+        self.assertEqual(views.page(quiet, GEN, 32, 49, 7)[1], ["All done: the grid is live."])
+        busy = views.page(SESSIONS[5], GEN, 32, 49, 7)  # an older watcher, or no --text: the tool's name
+        self.assertEqual(busy[1], ["> Bash"])
+        self.assertTrue(views.page({"id": "o", "state": "idle", "since": GEN}, GEN, 32, 49, 7)[1][0]
+                        .startswith("Nothing more to show"))
 
     def test_no_string_methods_circuitpython_lacks(self):
         for name in ("views.py", "code.py"):

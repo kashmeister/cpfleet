@@ -49,6 +49,17 @@ class ConversationState(unittest.TestCase):
         self.assertEqual(s([PROMPT, assistant(tool_use("p", "ExitPlanMode"))]), ("question", "plan approval"))
         self.assertEqual(s([assistant(TEXT, stop="end_turn"), PROMPT]), ("other", ""))  # a new prompt: working
 
+    def test_text_is_the_agents_own(self):
+        bash = dict(tool_use("t1", "Bash"), input={"command": "make", "description": "Run the tests"})
+        entries = [PROMPT, assistant({"type": "text", "text": "**Checking** the \u201cparser\u201d"}),
+                   assistant(bash)]
+        self.assertEqual(aw.claude_text(entries), ("**Checking** the \u201cparser\u201d", "Bash: Run the tests"))
+        self.assertEqual(aw.claude_text(entries + [tool_result("t1")])[1], "")
+        self.assertEqual(aw.claude_text([PROMPT]), ("", ""))  # never the prompt
+        self.assertEqual(aw.plain("**Checking** the \u201cparser\u201d\n\n# Done \u2014 ok"),
+                         'Checking the "parser" Done - ok')
+        self.assertEqual(aw.tail_text("x" * 10 + " " + "word " * 100, 40), "..." + "word " * 6 + "word")
+
     def test_turn_started(self):
         def at(e, ts):
             return dict(e, timestamp="2026-01-02T03:%02d:00.000Z" % ts)
@@ -67,6 +78,7 @@ class Snapshot(unittest.TestCase):
         aw.PROJECTS = self.root
         aw.CODEX_HOME = self.root / "no-codex"  # this computer's own Codex and opencode stay out of it
         aw.OPENCODE_DB = self.root / "no-opencode.db"
+        aw.DESKTOP_SESSIONS = self.root / "desktop"
         self.proj = self.root / "-Users-me-code-myproj"
         self.proj.mkdir()
 
@@ -78,6 +90,67 @@ class Snapshot(unittest.TestCase):
             (self.proj / sid).mkdir(exist_ok=True)
             (self.proj / sid / "custom-title.json").write_text(json.dumps({"customTitle": title}))
         return p
+
+    def test_titles_desktop_then_latest_rename_then_file(self):
+        rename = {"type": "custom-title", "customTitle": "New name"}
+        self.session("r", [PROMPT, rename, assistant(TEXT, stop="end_turn")], title="Old name")  # stale file
+        self.session("f", [PROMPT, assistant(TEXT, stop="end_turn")], title="From the file")
+        self.session("d", [PROMPT, rename, assistant(TEXT, stop="end_turn")], title="Old name")
+        self.session("x", [PROMPT, assistant(TEXT, stop="end_turn")], title="Archived")
+        app = self.root / "desktop" / "acct" / "org"
+        app.mkdir(parents=True)
+        (app / "local_1.json").write_text(json.dumps({"cliSessionId": "d", "title": "Desktop name"}))
+        (app / "local_2.json").write_text(json.dumps({"cliSessionId": "x", "title": "Gone", "isArchived": True}))
+        got = sorted(s["title"] for s in aw.snapshot(hours=3)["sessions"])
+        self.assertEqual(got, ["Desktop name", "From the file", "New name"])
+
+    def test_background_task_keeps_it_working(self):
+        launch = assistant(dict(tool_use("bg", "Bash"), input={"command": "make", "description": "Build it",
+                                                               "run_in_background": True}))
+        started = dict(tool_result("bg"), toolUseResult={"backgroundTaskId": "b123", "stdout": ""})
+        done = assistant(TEXT, stop="end_turn")
+        news = {"type": "attachment", "attachment": {"type": "queued_command", "prompt":
+                "<task-notification>\n<task-id>b123</task-id>\n<status>completed</status>\n</task-notification>"}}
+        agent = dict(tool_result("ag"), toolUseResult={"agentId": "a9", "isAsync": True, "status": "async_launched"})
+        self.session("w", [PROMPT, launch, started, done], title="Waits on a build")
+        self.session("d", [PROMPT, launch, started, done, news], title="Build finished")
+        self.session("a", [PROMPT, assistant(tool_use("ag", "Agent")), agent, done], title="Waits on an agent")
+        self.session("s", [PROMPT, launch, started, done], title="Stale", age=2 * 3600)
+        got = {s["title"]: s["state"] for s in aw.snapshot(hours=3)["sessions"]}
+        self.assertEqual(got, {"Waits on a build": "background", "Build finished": "your-turn",
+                               "Waits on an agent": "background", "Stale": "your-turn"})
+        self.assertEqual(aw.background_tasks([PROMPT, launch, started]), {"b123": "Bash: Build it"})
+        user_news = {"type": "user", "message": {"role": "user", "content":
+                     "<task-notification><task-id>b123</task-id><status>failed</status></task-notification>"}}
+        self.assertEqual(aw.background_tasks([PROMPT, launch, started, user_news]), {})
+
+    def test_background_launch_far_back(self):
+        # The launch is further back than the tail read for the state: the whole file is followed
+        launch = assistant(dict(tool_use("bg", "Bash"), input={"command": "make", "run_in_background": True}))
+        started = dict(tool_result("bg"), toolUseResult={"backgroundTaskId": "b7"})
+        bulk = [assistant({"type": "text", "text": "x" * 4000}, stop="end_turn")] * 200  # ~800 KB
+        p = self.session("far", [PROMPT, launch, started] + bulk, title="Far back")
+        self.assertEqual(aw.snapshot(hours=3)["sessions"][0]["state"], "background")
+        with open(p, "a") as f:  # the news arrives; only the new bytes are read
+            f.write(json.dumps({"type": "attachment", "attachment": {"type": "queued_command", "prompt":
+                    "<task-notification><task-id>b7</task-id><status>completed</status></task-notification>"}})
+                    + "\n")
+        self.assertEqual(aw.snapshot(hours=3)["sessions"][0]["state"], "your-turn")
+
+    def test_running_subagent_after_the_turn_is_background(self):
+        s = {"state": "your-turn", "subagents": [{"done": False}]}
+        aw.busy_with_subagents(s)
+        self.assertEqual(s["state"], "background")
+        s = {"state": "idle", "subagents": [{"done": False}]}
+        aw.busy_with_subagents(s)
+        self.assertEqual(s["state"], "working")
+
+    def test_task_news_is_not_a_prompt(self):
+        def at(e, minute):
+            return dict(e, timestamp="2026-01-02T03:%02d:00.000Z" % minute)
+        news = {"type": "user", "message": {"role": "user", "content": "<task-notification>...</task-notification>"}}
+        base = aw.iso_time("2026-01-02T03:00:00Z")
+        self.assertEqual(aw.turn_started([at(PROMPT, 1), at(news, 5)]), base + 60)
 
     def test_states_titles_subagents_and_order(self):
         self.session("a", [PROMPT, assistant(TEXT, stop="end_turn")], title="Finished one", age=120)

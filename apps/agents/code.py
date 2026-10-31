@@ -1,18 +1,21 @@
-# Coding agents on a MagTag: the Claude Code, Codex and opencode sessions and running subagents that
-# extras/agents_watch.py reports, one view per tool, with the LEDs pulsing amber while a session of any
-# tool waits for you (A steps through the views; each view's top line says how many of its sessions wait).
-#   A: next view: Claude, Codex, opencode (when they have sessions), a quote
-#   B: acknowledge (LEDs off until something new waits)      C: another quote (in quote view)
-# The screen redraws at most every AGENTS_REDRAW seconds (default 30) for new data; buttons redraw at once.
-# Text is terminalio's font at one and a half times its size (32 x 7 characters); AGENTS_FONT = "small"
-# keeps it as it is (49 x 10).
+# Coding agents on a MagTag: the Claude Code, Codex and opencode sessions that extras/agents_watch.py
+# reports, as a grid of cards, each under one of the four LEDs and above one of the four buttons. A card
+# that waits for you has a black bar along its top, and its LED flashes red every few seconds. The LEDs
+# otherwise glow a dim, soft warm white, so the screen can be read in the dark (CPFLEET_GLOW, 0-255; 0 is off).
+#   The 4 sessions that matter most, with their subagents under the title.
+#   A button: that column's session on a page of its own, frozen as it was when pressed: what it's doing,
+#             its subagents and how its latest reply ends (from a watcher run with --text). That counts as
+#             having seen it (its bar and LED go). Any button, or AGENTS_PAGE seconds (20), goes back.
+# Order: waiting for you, then busy and working, then the rest, most recent first; a session keeps its
+# place while it stays on screen. With no sessions at all, a quote (any button: another).
+# The screen redraws at most every AGENTS_REDRAW seconds (default 30) for new data, except at once for a
+# new session waiting for you, or a button.
 # Where the data comes from, first match wins:
 #   USB: lines on usb_cdc.data from agents_watch.py --usb (needs CPFLEET_USB_DATA = 1 and a reset; boot.py)
 #   Wi-Fi: AGENTS_URL if set, else the watcher found by name over mDNS (_cpagents._tcp); a failing
 #          AGENTS_URL is looked up again by name. AGENTS_TOKEN, if set, is sent to a watcher that wants one.
 # Built-in modules only (no lib/); usblink.py is this app's USB line protocol, views.py its screens.
 import json
-import math
 import os
 import random
 import time
@@ -24,6 +27,7 @@ import keypad
 import neopixel_write
 import socketpool
 import terminalio
+import vectorio
 import wifi
 
 import usblink
@@ -44,13 +48,17 @@ POLL = 3            # seconds between fetches
 USB_STALE = 10      # seconds without a USB line before falling back to Wi-Fi
 LOOKUP_EVERY = 30   # seconds between mDNS lookups while there's no working address
 LOOKUP_AFTER = 3    # failed fetches in a row before looking the watcher up again
-FRESH = 3600        # waiting sessions newer than this light the LEDs
 OFFLINE = 30        # seconds without a reply before saying the watcher is offline
 QUOTE_EVERY = 15 * 60
+PAGE_FOR = int(os.getenv("AGENTS_PAGE") or 20)  # seconds a session's page stays up without a button
 # Minimum seconds between e-ink redraws for new data, to spare the panel; the LEDs still react at once.
-# Button presses redraw straight away. Override per board: cpfleet settings <b> set AGENTS_REDRAW 60
+# Override per board: cpfleet settings <b> set AGENTS_REDRAW 60
 REDRAW = int(os.getenv("AGENTS_REDRAW") or 30)
-SMALL_TEXT = os.getenv("AGENTS_FONT") == "small"
+GLOW = int(os.getenv("CPFLEET_GLOW") or 5)  # the LEDs' constant brightness, 0-255 (1 is the dimmest)
+WARM = (1.0, 0.8, 0.6)                    # soft white, like a 3000 K bulb: (5, 4, 3) at the default brightness
+BLINK_EVERY, BLINK_FOR = 2.5, 0.25          # seconds: a red flash on the columns that need you
+# Which LED is over which column, left to right (neopixel_write's order): AGENTS_LEDS = "3210" etc.
+LED_ORDER = [int(c) for c in (os.getenv("AGENTS_LEDS") or "3210")]
 
 display = board.DISPLAY
 FONT = terminalio.FONT
@@ -153,23 +161,40 @@ def quote_lines(quote, cols, rows):
     return [""] * max(0, (rows - len(lines)) // 2) + lines
 
 
-# ---- screen and LEDs -----------------------------------------------------------------------------------
+# ---- screen --------------------------------------------------------------------------------------------
 
-# A check mark for finished subagents, one character cell in size (terminalio's font has none). Drawn in
-# the font's 6x12 cell as its capitals are: rows 2-8, columns 0-4, the last column left blank as spacing.
-CHECK_SHAPE = ("    #",
-               "    #",
-               "   ##",
-               "   # ",
-               "# ## ",
-               "###  ",
-               " #   ")
-CHECK_TOP = 2
+# Pictures drawn in a 12 x 12 cell: the states' icons, and a check mark for finished subagents in the
+# font's 6 x 12 cell (its capitals' rows 2-8; terminalio's font has no check mark).
+ICON_SHAPES = {
+    "question": ("   ######   ", "  ##    ##  ", "  ##    ##  ", "        ##  ", "       ##   ", "     ###    ",
+                 "     ##     ", "     ##     ", "            ", "     ##     ", "     ##     ", "            "),
+    "your-turn": ("            ", "  ###  ###  ", "  ###  ###  ", "  ###  ###  ", "  ###  ###  ", "  ###  ###  ",
+                  "  ###  ###  ", "  ###  ###  ", "  ###  ###  ", "  ###  ###  ", "  ###  ###  ", "            "),
+    "working": ("            ", "  ##        ", "  ####      ", "  ######    ", "  ########  ", "  ######### ",
+                "  ######### ", "  ########  ", "  ######    ", "  ####      ", "  ##        ", "            "),
+    "background": ("     ##     ", "  #  ##  #  ", " ### ## ### ", "  ########  ", "  ##    ##  ", "####    ####",
+                   "####    ####", "  ##    ##  ", "  ########  ", " ### ## ### ", "  #  ##  #  ", "     ##     "),
+    "busy": (" ########## ", "  #      #  ", "   #    #   ", "    #  #    ", "     ##     ", "     ##     ",
+             "    #  #    ", "   # ## #   ", "  # #### #  ", "  ########  ", " ########## ", "            "),
+    "idle": ("            ", " ########## ", " ########## ", "        ##  ", "       ##   ", "      ##    ",
+             "     ##     ", "    ##      ", "   ##       ", " ########## ", " ########## ", "            "),
+}
+CHECK_SHAPE = ("", "", "    #", "    #", "   ##", "   # ", "# ## ", "###  ", " #   ")
 
 
-def check_pixel(x, y):
-    y -= CHECK_TOP
-    return 0 <= y < len(CHECK_SHAPE) and x < len(CHECK_SHAPE[y]) and CHECK_SHAPE[y][x] == "#"
+def picture(shape, w, h, xs=None, ys=None):
+    """A two-colour Bitmap of shape (rows of "#"), w x h, each pixel from the shape's (xs[x], ys[y])."""
+    bmp = displayio.Bitmap(w, h, 2)
+    for y in range(h):
+        row = shape[ys[y] if ys else y] if (ys[y] if ys else y) < len(shape) else ""
+        for x in range(w):
+            sx = xs[x] if xs else x
+            if sx < len(row) and row[sx] == "#":
+                bmp[x, y] = 1
+    return bmp
+
+
+ICONS = dict((k, picture(v, 12, 12)) for k, v in ICON_SHAPES.items())
 
 
 class Font:
@@ -180,11 +205,7 @@ class Font:
         self.cw, self.ch = CW * num // den, CH * num // den
         xs = [x * den // num for x in range(self.cw)]  # the original column and row of each new one
         ys = [y * den // num for y in range(self.ch)]
-        self.check = displayio.Bitmap(self.cw, self.ch, 2)
-        for y in range(self.ch):
-            for x in range(self.cw):
-                if check_pixel(xs[x], ys[y]):
-                    self.check[x, y] = 1
+        self.check = picture(CHECK_SHAPE, self.cw, self.ch, xs, ys)
         if num == den:
             self.bitmap, self.tiles = FONT.bitmap, None
             self.blank = FONT.get_glyph(ord(" ")).tile_index
@@ -211,44 +232,105 @@ class Font:
         glyph = FONT.get_glyph(ord(ch))
         return glyph.tile_index if glyph is not None else None
 
-    def size(self, scale=1):
-        """(columns, rows) on the display"""
-        return display.width // (self.cw * scale), display.height // (self.ch * scale)
+
+SMALL = Font()       # 6 x 12
+LARGE = Font(3, 2)   # 9 x 18
+
+PAPER = displayio.Palette(2)
+PAPER[0], PAPER[1] = 0xFFFFFF, 0x000000
 
 
-SMALL = Font()
-TEXT = SMALL if SMALL_TEXT else Font(3, 2)  # the agents views
-
-
-def draw(lines, font, scale):
-    cols, rows = font.size(scale)
-    palette = displayio.Palette(2)
-    palette[0], palette[1] = 0xFFFFFF, 0x000000
+def text(group, lines, font, x, y, cols, rows, palette, scale=1):
+    """lines into group at (x, y), each character placed from the top-left (terminalio.Terminal writes from
+    the bottom row and scrolls up, so a short list would end up at the bottom), check marks drawn."""
+    g = displayio.Group(scale=scale, x=x, y=y)
     grid = displayio.TileGrid(font.bitmap, pixel_shader=palette, width=cols, height=rows,
                               tile_width=font.cw, tile_height=font.ch, default_tile=font.blank)
-    text, checks = [], []
+    g.append(grid)
     for r, line in enumerate(lines[:rows]):
-        line = line[:cols - 1]
-        c = line.find(views.CHECK)
-        while c >= 0:
-            checks.append((c, r))
-            c = line.find(views.CHECK, c + 1)
-        text.append(line.replace(views.CHECK, " "))
-    # Place each character in the grid ourselves, from the top-left. terminalio.Terminal writes from its
-    # cursor at the bottom row and scrolls up, so a short list ended up at the bottom of the screen.
-    for r, line in enumerate(text):
-        for c, ch in enumerate(line):
-            if ch != " ":
+        for c, ch in enumerate(line[:cols]):
+            if ch == views.CHECK:
+                g.append(displayio.TileGrid(font.check, pixel_shader=palette, x=c * font.cw, y=r * font.ch))
+            elif ch != " ":
                 t = font.tile(ch)
                 if t is not None:
                     grid[c, r] = t
-    group = displayio.Group(scale=scale)
-    group.append(grid)
-    for c, r in checks:
-        group.append(displayio.TileGrid(font.check, pixel_shader=palette, x=c * font.cw, y=r * font.ch))
+    group.append(g)
+
+
+def icon(group, state, x, y, palette, scale=1):
+    if state in ICONS:
+        g = displayio.Group(scale=scale, x=x, y=y)
+        g.append(displayio.TileGrid(ICONS[state], pixel_shader=palette))
+        group.append(g)
+
+
+def box(group, x, y, w, h, colour=1):
+    """A filled rectangle: black (1) by default, or white (0)."""
+    group.append(vectorio.Rectangle(pixel_shader=PAPER, color_index=colour, width=w, height=h, x=x, y=y))
+
+
+def draw_card(group, c, x, y, w, h):
+    """One card (views.card) in the w x h box at (x, y); its right edge is the grid line, left out here.
+    Black on white always; one waiting for you gets a bar along its top; subagents sit under a rule."""
+    state, el, title, subs, footer, marked = c
+    if marked:
+        box(group, x, y, w - 1, 5)
+    icon(group, state, x + 3, y + 8, PAPER, 2)
+    text(group, [el], SMALL, x + 31, y + 8, 3, 1, PAPER, 2)
+    text(group, list(title), LARGE, x + 1, y + 36, 8, len(title), PAPER)
+    if subs:
+        box(group, x + 1, y + 73, w - 4, 1)
+        text(group, list(subs), SMALL, x + 1, y + 76, 12, len(subs), PAPER)
+    text(group, [footer], SMALL, x + 1, y + h - 13, 12, 1, PAPER)
+
+
+def show(group):
     display.root_group = group
     display.refresh()
 
+
+def draw_grid(cards):
+    group = displayio.Group()
+    box(group, 0, 0, display.width, display.height, 0)
+    w = display.width // 4
+    for i, c in enumerate(cards):
+        if c is not None:
+            draw_card(group, c, i * w, 0, w, display.height)
+    for col in range(1, 4):
+        box(group, col * w - 1, 0, 1, display.height)
+    show(group)
+
+
+PAGE_HEAD = 2 * LARGE.ch + 3  # where the page's small text starts, under its two large lines and a rule
+
+
+def page_size():
+    """(head columns, body columns, body rows) of a session's page"""
+    return (display.width // LARGE.cw, display.width // SMALL.cw,
+            (display.height - PAGE_HEAD) // SMALL.ch)
+
+
+def draw_page(state, head, body):
+    hc, bc, br = page_size()
+    group = displayio.Group()
+    box(group, 0, 0, display.width, display.height, 0)
+    text(group, head, LARGE, 0, 0, hc, 2, PAPER)
+    icon(group, state, 2, 3, PAPER)
+    box(group, 0, 2 * LARGE.ch + 1, display.width, 1)
+    text(group, body, SMALL, 0, PAGE_HEAD, bc, br, PAPER)
+    show(group)
+
+
+def draw_text(lines, scale):
+    group = displayio.Group()
+    box(group, 0, 0, display.width, display.height, 0)
+    text(group, lines, SMALL, 0, 0, display.width // (CW * scale), display.height // (CH * scale), PAPER,
+         scale)
+    show(group)
+
+
+# ---- LEDs ----------------------------------------------------------------------------------------------
 
 led_power = digitalio.DigitalInOut(board.NEOPIXEL_POWER)
 led_power.switch_to_output(value=False)  # low = LEDs powered on the MagTag
@@ -257,26 +339,33 @@ led_pin.direction = digitalio.Direction.OUTPUT
 led_last = None
 
 
-def leds(r, g, b):
+def leds(colours):
+    """colours: (r, g, b) for each column, left to right."""
     global led_last
-    if (r, g, b) != led_last:
-        neopixel_write.neopixel_write(led_pin, bytes([g, r, b] * 4))
-        led_last = (r, g, b)
+    if colours != led_last:
+        buf = bytearray(12)
+        for col, (r, g, b) in enumerate(colours):
+            i = LED_ORDER[col] * 3
+            buf[i], buf[i + 1], buf[i + 2] = g, r, b
+        neopixel_write.neopixel_write(led_pin, buf)
+        led_last = colours
 
 
 # ---- main loop -----------------------------------------------------------------------------------------
 
-keys = keypad.Keys((board.BUTTON_A, board.BUTTON_B, board.BUTTON_C), value_when_pressed=False, pull=True)
+keys = keypad.Keys((board.BUTTON_A, board.BUTTON_B, board.BUTTON_C, board.BUTTON_D),
+                   value_when_pressed=False, pull=True)
 quotes = load_quotes()
 quote = random.choice(quotes)
 quote_at = time.monotonic()
-view, data, shown, acked = "claude", {}, None, set()
-data_n, built, lines, font, scale = 0, None, [], SMALL, 1  # data_n counts snapshots: lines are rebuilt only for new ones
+data, acked, slots = {}, set(), []
+page, page_at, page_spec = None, 0, None  # the session on a page of its own, frozen
+data_n, built, spec, shown = 0, None, None, None  # data_n counts snapshots, so screens are rebuilt only for new ones
 last_draw, force = -REDRAW, True
 last_fetch, last_ok = -POLL, time.monotonic()
 url, fails, last_lookup = URL, 0, -LOOKUP_EVERY
 reader, last_usb, source = usblink.LineReader(), None, ""
-was_known = False
+was_known, waiting_before = False, set()
 if usb:
     usb.timeout, usb.write_timeout = 0, 0.2
 
@@ -313,61 +402,73 @@ while True:
                 fails += 1
                 print("fetch failed:", e)
 
+    gen = data.get("generated", 0)
+    by_key = dict((views.key(s), s) for s in data.get("sessions", []))
+    slots = views.assign(slots, [views.key(s) for s in views.ranked(data, acked)], 4)
+
     event = keys.events.get()
-    if event and event.pressed:
+    if event and event.pressed:  # opens the session above the button; on a page, any button goes back
         force = True
-        if event.key_number == 0:
-            view = views.next_view(view, data)
-        elif event.key_number == 1:
-            acked |= {(s["id"], s["since"]) for s in data.get("sessions", [])}
-        elif event.key_number == 2 and view == "quote":
+        if not by_key:
             quote, quote_at = random.choice(quotes), now
-    if view == "quote" and now - quote_at > QUOTE_EVERY:
+        else:
+            page, page_at = (slots[event.key_number] if page is None else None), now
+            if page in by_key:
+                s = by_key[page]
+                acked.add((s.get("id"), s.get("since")))  # seen: its bar and LED go
+                head, body = views.page(s, gen, *page_size())
+                page_spec = ("page", s.get("state"), tuple(head), tuple(body))  # frozen until it closes
+    if page is not None and now - page_at > PAGE_FOR:
+        page, force = None, True
+    if not by_key and now - quote_at > QUOTE_EVERY:
         quote, quote_at = random.choice(quotes), now
 
     known = bool(url) or last_usb is not None
     if known and not was_known:  # replace the "looking for the watcher" screen at once
         force, was_known = True, True
     offline = known and now - last_ok > OFFLINE
-    gen = data.get("generated", 0)
-    waiting = [s for s in data.get("sessions", []) if s["state"] in ("question", "your-turn")
-               and gen - s["since"] < FRESH and (s["id"], s["since"]) not in acked]
-    if waiting and not offline:
-        level = 0.15 + 0.85 * (0.5 + 0.5 * math.sin(now * 3))  # pulse
-        leds(int(90 * level), int(40 * level), 0)
-    elif offline:
-        leds(8, 0, 0)
+    waiting = set(k for k in slots if k and views.needs_you(by_key[k], gen, acked))
+    if waiting - waiting_before:  # something new waits for you: show it now
+        force = True
+    waiting_before = waiting
+    glow = tuple(int(GLOW * f + 0.5) for f in WARM)
+    if offline:
+        leds([(8, 0, 0)] * 4)
+    elif waiting and now % BLINK_EVERY < BLINK_FOR:  # a red flash over the columns that need you
+        leds([(120, 0, 0) if slots[c] in waiting else glow for c in range(4)])
     else:
-        leds(0, 0, 0)
+        leds([glow] * 4)
 
     due = force or now - last_draw >= REDRAW
     if not due:
         time.sleep(0.05)
         continue
-    if view not in views.views(data):  # that tool's sessions are gone
-        view = "claude"
-    key = (data_n, view, offline, source, known, quote)
-    if key == built:
-        pass
-    elif not known:
-        lines, font, scale = ["Looking for the agents watcher...", "",
-                              "Start extras/agents_watch.py on the Mac", "(Wi-Fi, found by name), or with --usb",
-                              "and plug this board into it. Or set",
-                              "AGENTS_URL http://<mac-ip>:8766/agents.json"], SMALL, 1
-    elif view != "quote":
-        cols, rows = TEXT.size()
-        lines, font, scale = views.agent_lines(data, view, cols, rows, offline, source), TEXT, 1
-    else:
-        cols, rows = SMALL.size(2)
-        lines, font, scale = quote_lines(quote, cols, rows), SMALL, 2
-    built = key
-    screen = (lines, font, scale)
-    if screen != shown and display.time_to_refresh == 0 and not display.busy:
+    key = (data_n, page, offline, known, quote, tuple(slots), len(acked))
+    if key != built:
+        built = key
+        if not known:
+            spec = ("text", ("Looking for the agents watcher...", "",
+                             "Start extras/agents_watch.py on the Mac", "(Wi-Fi, found by name), or with --usb",
+                             "and plug this board into it. Or set",
+                             "AGENTS_URL http://<mac-ip>:8766/agents.json"), 1)
+        elif page is not None:
+            spec = page_spec
+        elif by_key:
+            spec = ("grid", tuple(views.card(by_key[k], gen, acked) if k else None for k in slots))
+        else:
+            cols, rows = display.width // (CW * 2), display.height // (CH * 2)
+            spec = ("text", tuple(quote_lines(quote, cols, rows)), 2)
+    if spec != shown and display.time_to_refresh == 0 and not display.busy:
         try:
-            draw(lines, font, scale)
-            shown, last_draw, force = screen, now, False
+            if spec[0] == "grid":
+                draw_grid(spec[1])
+            elif spec[0] == "page":
+                draw_page(spec[1], list(spec[2]), list(spec[3]))
+            else:
+                draw_text(list(spec[1]), spec[2])
+            shown, last_draw, force = spec, now, False
         except RuntimeError:  # refreshed too soon; try again next time round
             pass
-    elif force and screen == shown:
+    elif force and spec == shown:
         force = False
     time.sleep(0.05)
