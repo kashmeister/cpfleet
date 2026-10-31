@@ -83,14 +83,14 @@ python3 extras/agents_watch.py --usb                   # HTTP and USB; --no-http
 | `AGENTS_TOKEN` | none | Sent as `Authorization: Bearer …`; needed when the watcher runs with `AGENTS_TOKEN` set |
 | `AGENTS_REDRAW` | 30 | Minimum seconds between e-ink redraws for new data |
 | `AGENTS_PAGE` | 20 | Seconds a session's page stays up |
-| `CPFLEET_GLOW` | 8 | The LEDs' constant brightness, 0-255 (0: off) |
+| `CPFLEET_GLOW` | 5 | The LEDs' constant brightness, 0-255 (0: off) |
 | `AGENTS_LEDS` | `3210` | Which LED is over each column, left to right |
 | `CPFLEET_USB_DATA` | off | `1`: turn on the USB data channel at boot (`boot.py`; needs a reset) |
 
 At most 8 sessions per tool and 3 subagents per session are sent; the header counts them all.
 
 **LEDs:**
-- **A dim, soft warm white glow, always:** so the screen can be read in the dark (`CPFLEET_GLOW`, 8 by default: `cpfleet settings <b> set CPFLEET_GLOW 20` is brighter, `1` the dimmest, `0` off; the quotes app does the same).
+- **A dim, soft white glow, always:** so the screen can be read in the dark (`CPFLEET_GLOW`, 5 by default: `cpfleet settings <b> set CPFLEET_GLOW 10` is brighter, `1` the dimmest, `0` off; the quotes app does the same).
 - **A red flash over a column every 2.5 seconds:** its session has been waiting for less than an hour and you haven't opened it.
 - **All dim red:** no reply from the watcher for 30 s.
 - If the LEDs are over the wrong columns on your board, `cpfleet settings <b> set AGENTS_LEDS 0123` gives their order, left to right (the MagTag's own is `3210`).

@@ -1,7 +1,7 @@
 # Coding agents on a MagTag: the Claude Code, Codex and opencode sessions that extras/agents_watch.py
 # reports, as a grid of cards, each under one of the four LEDs and above one of the four buttons. A card
 # that waits for you has a black bar along its top, and its LED flashes red every few seconds. The LEDs
-# otherwise glow a dim, soft warm white, so the screen can be read in the dark (CPFLEET_GLOW, 0-255; 0 is off).
+# otherwise glow a dim soft white, so the screen can be read in the dark (CPFLEET_GLOW, 0-255; 0 is off).
 #   The 4 sessions that matter most, with their subagents under the title.
 #   A button: that column's session on a page of its own, frozen as it was when pressed: what it's doing,
 #             its subagents and how its latest reply ends (from a watcher run with --text). That counts as
