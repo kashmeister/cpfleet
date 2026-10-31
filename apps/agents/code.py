@@ -58,7 +58,7 @@ REDRAW = int(os.getenv("AGENTS_REDRAW") or 30)
 GLOW = int(os.getenv("CPFLEET_GLOW") or 25)  # the LEDs' constant brightness, 0-255 (1 is the dimmest)
 WARM = (1.0, 0.0, 0.0)                      # the constant glow: dim red, (25, 0, 0) at the default brightness; red can run brighter, the eye is less sensitive to it
 PULSE_EVERY = 3.6                           # seconds: one slow, relaxed fade red -> orange -> red
-PULSE_TO = (30, 5, 0)                      # the colour a waiting column fades towards: a deep amber like a BMW instrument cluster (little green: these LEDs turn yellow fast)
+PULSE_TO = (25, 7, 0)                      # the colour a waiting column fades towards: orange, a gentle shift from the red glow
 # The LEDs take whole steps (0-255), and so few between the glow and PULSE_TO that a plain fade visibly
 # steps. While a column pulses, the loop runs about every 5 ms instead of 50 and alternates each channel
 # between the two whole values around it (ordered dithering): the eye blends them into a level between.
