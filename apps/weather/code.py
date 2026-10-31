@@ -30,7 +30,7 @@ EVERY = 60 * int(os.getenv("WEATHER_EVERY") or 15)
 RETRY = 60
 METRIC = (os.getenv("WEATHER_UNITS") or "").lower() == "metric"
 GLOW = int(os.getenv("CPFLEET_GLOW") or 5)  # 1 is the dimmest
-WARM = (1.0, 0.8, 0.6)  # soft white, like a 3000 K bulb: (5, 4, 3) at the default brightness
+WARM = (1.0, 0.45, 0.15)  # warm orange, like a candle or a 2000-2200 K bulb: (5, 2, 1) at the default brightness
 display = board.DISPLAY
 pool = socketpool.SocketPool(wifi.radio)
 context = ssl.create_default_context()
