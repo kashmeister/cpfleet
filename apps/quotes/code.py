@@ -1,7 +1,7 @@
 # Random quotes on the MagTag's e-ink screen.
 # Shows a new quote every INTERVAL seconds; button A shows another one now.
 # Quotes come from /quotes.txt ("text | author" per line). Update either file over Wi-Fi with deploy.sh.
-# The LEDs glow a dim, soft warm white so it can be read in the dark (CPFLEET_GLOW in settings.toml, 0-255; 0 is off).
+# The LEDs glow a dim red, easy on the eyes at night (CPFLEET_GLOW in settings.toml, 0-255; 0 is off).
 # Uses only built-in modules (terminalio's font and text grid), so lib/ can stay empty.
 import os
 import random
@@ -15,8 +15,8 @@ import neopixel_write
 import terminalio
 
 INTERVAL = 15 * 60  # seconds between quotes
-GLOW = int(os.getenv("CPFLEET_GLOW") or 5)  # 1 is the dimmest
-WARM = (1.0, 0.8, 0.6)  # soft white, like a 3000 K bulb: (5, 4, 3) at the default brightness
+GLOW = int(os.getenv("CPFLEET_GLOW") or 25)  # 1 is the dimmest
+WARM = (1.0, 0.0, 0.0)  # dim red glow, easy on the eyes at night: (25, 0, 0) at the default brightness; red can run brighter, the eye is less sensitive to it
 display = board.DISPLAY
 FONT = terminalio.FONT
 CW, CH = FONT.get_bounding_box()[:2]  # one character cell, in pixels

@@ -1,7 +1,7 @@
 # Coding agents on a MagTag: the Claude Code, Codex and opencode sessions that extras/agents_watch.py
 # reports, as a grid of cards, each under one of the four LEDs and above one of the four buttons. A card
-# that waits for you has a black bar along its top, and its LED flashes red every few seconds. The LEDs
-# otherwise glow a dim soft white, so the screen can be read in the dark (CPFLEET_GLOW, 0-255; 0 is off).
+# that waits for you has a black bar along its top, and its LED fades slowly between red and orange. The LEDs
+# otherwise glow a dim red, easy on the eyes at night (CPFLEET_GLOW, 0-255; 0 is off). All dark: no watcher.
 #   The 4 sessions that matter most, with their subagents under the title.
 #   A button: that column's session on a page of its own, frozen as it was when pressed: what it's doing,
 #             its subagents and how its latest reply ends (from a watcher run with --text). That counts as
@@ -16,6 +16,7 @@
 #          AGENTS_URL is looked up again by name. AGENTS_TOKEN, if set, is sent to a watcher that wants one.
 # Built-in modules only (no lib/); usblink.py is this app's USB line protocol, views.py its screens.
 import json
+import math
 import os
 import random
 import time
@@ -54,9 +55,15 @@ PAGE_FOR = int(os.getenv("AGENTS_PAGE") or 20)  # seconds a session's page stays
 # Minimum seconds between e-ink redraws for new data, to spare the panel; the LEDs still react at once.
 # Override per board: cpfleet settings <b> set AGENTS_REDRAW 60
 REDRAW = int(os.getenv("AGENTS_REDRAW") or 30)
-GLOW = int(os.getenv("CPFLEET_GLOW") or 5)  # the LEDs' constant brightness, 0-255 (1 is the dimmest)
-WARM = (1.0, 0.8, 0.6)                    # soft white, like a 3000 K bulb: (5, 4, 3) at the default brightness
-BLINK_EVERY, BLINK_FOR = 2.5, 0.25          # seconds: a red flash on the columns that need you
+GLOW = int(os.getenv("CPFLEET_GLOW") or 25)  # the LEDs' constant brightness, 0-255 (1 is the dimmest)
+WARM = (1.0, 0.0, 0.0)                      # the constant glow: dim red, (25, 0, 0) at the default brightness; red can run brighter, the eye is less sensitive to it
+PULSE_EVERY = 3.6                           # seconds: one slow, relaxed fade red -> orange -> red
+PULSE_TO = (25, 7, 0)                      # the colour a waiting column fades towards: orange, a gentle shift from the red glow
+# The LEDs take whole steps (0-255), and so few between the glow and PULSE_TO that a plain fade visibly
+# steps. While a column pulses, the loop runs about every 5 ms instead of 50 and alternates each channel
+# between the two whole values around it (ordered dithering): the eye blends them into a level between.
+DITHER = (0.125, 0.625, 0.375, 0.875)
+PULSE_NAP, IDLE_NAP = 0.005, 0.05          # seconds the loop sleeps while a column pulses, and otherwise
 # Which LED is over which column, left to right (neopixel_write's order): AGENTS_LEDS = "3210" etc.
 LED_ORDER = [int(c) for c in (os.getenv("AGENTS_LEDS") or "3210")]
 
@@ -362,6 +369,7 @@ data, acked, slots = {}, set(), []
 page, page_at, page_spec = None, 0, None  # the session on a page of its own, frozen
 data_n, built, spec, shown = 0, None, None, None  # data_n counts snapshots, so screens are rebuilt only for new ones
 last_draw, force = -REDRAW, True
+frame = 0  # counts loop passes, for the dithering
 last_fetch, last_ok = -POLL, time.monotonic()
 url, fails, last_lookup = URL, 0, -LOOKUP_EVERY
 reader, last_usb, source = usblink.LineReader(), None, ""
@@ -433,15 +441,22 @@ while True:
     waiting_before = waiting
     glow = tuple(int(GLOW * f + 0.5) for f in WARM)
     if offline:
-        leds([(8, 0, 0)] * 4)
-    elif waiting and now % BLINK_EVERY < BLINK_FOR:  # a red flash over the columns that need you
-        leds([(120, 0, 0) if slots[c] in waiting else glow for c in range(4)])
+        leds([(0, 0, 0)] * 4)  # dark: no data from the watcher (the normal glow is red, so not red)
+    elif waiting:
+        # The columns that need you fade slowly between the red glow and orange and back, so the one that
+        # waits always looks different from the steady red ones, whenever you glance at it.
+        t = 0.5 - 0.5 * math.cos(2 * math.pi * now / PULSE_EVERY)  # 0 (glow) .. 1 (PULSE_TO)
+        frame += 1
+        d = DITHER[frame % len(DITHER)]
+        pulse = tuple(int(a + (b - a) * t + d) for a, b in zip(glow, PULSE_TO))
+        leds([pulse if slots[c] in waiting else glow for c in range(4)])
     else:
         leds([glow] * 4)
 
+    nap = PULSE_NAP if waiting and not offline else IDLE_NAP
     due = force or now - last_draw >= REDRAW
     if not due:
-        time.sleep(0.05)
+        time.sleep(nap)
         continue
     key = (data_n, page, offline, known, quote, tuple(slots), len(acked))
     if key != built:
@@ -471,4 +486,4 @@ while True:
             pass
     elif force and spec == shown:
         force = False
-    time.sleep(0.05)
+    time.sleep(nap)
